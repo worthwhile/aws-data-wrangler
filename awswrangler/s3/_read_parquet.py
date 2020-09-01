@@ -175,7 +175,7 @@ def _arrowtable2df(
             split_blocks=True,
             self_destruct=True,
             integer_object_nulls=False,
-            date_as_object=True,
+            date_as_object=False,
             ignore_metadata=True,
             categories=categories,
             safe=safe,
