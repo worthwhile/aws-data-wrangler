@@ -9,6 +9,7 @@ Quick Start
 
     import awswrangler as wr
     import pandas as pd
+    from datetime import datetime
 
     df = pd.DataFrame({"id": [1, 2], "value": ["foo", "boo"]})
 
@@ -27,17 +28,30 @@ Quick Start
     # Retrieving the data from Amazon Athena
     df = wr.athena.read_sql_query("SELECT * FROM my_table", database="my_db")
 
-    # Get Redshift connection (SQLAlchemy) from Glue and retrieving data from Redshift Spectrum
-    engine = wr.catalog.get_engine("my-redshift-connection")
-    df = wr.db.read_sql_query("SELECT * FROM external_schema.my_table", con=engine)
+    # Get a Redshift connection from Glue Catalog and retrieving data from Redshift Spectrum
+    con = wr.redshift.connect("my-glue-connection")
+    df = wr.redshift.read_sql_query("SELECT * FROM external_schema.my_table", con=con)
+    con.close()
 
-    # Get MySQL connection (SQLAlchemy) from Glue Catalog and LOAD the data into MySQL
-    engine = wr.catalog.get_engine("my-mysql-connection")
-    wr.db.to_sql(df, engine, schema="test", name="my_table")
+    # Amazon Timestream Write
+    df = pd.DataFrame({
+        "time": [datetime.now(), datetime.now()],   
+        "my_dimension": ["foo", "boo"],
+        "measure": [1.0, 1.1],
+    })
+    rejected_records = wr.timestream.write(df,
+        database="sampleDB",
+        table="sampleTable",
+        time_col="time",
+        measure_col="measure",
+        dimensions_cols=["my_dimension"],
+    )
 
-    # Get PostgreSQL connection (SQLAlchemy) from Glue Catalog and LOAD the data into PostgreSQL
-    engine = wr.catalog.get_engine("my-postgresql-connection")
-    wr.db.to_sql(df, engine, schema="test", name="my_table")
+    # Amazon Timestream Query
+    wr.timestream.query("""
+    SELECT time, measure_value::double, my_dimension
+    FROM "sampleDB"."sampleTable" ORDER BY time DESC LIMIT 3
+    """)
 
 Read The Docs
 -------------
@@ -47,8 +61,11 @@ Read The Docs
 
    what
    install
-   Tutorials <https://github.com/awslabs/aws-data-wrangler/tree/master/tutorials>
+   tutorials
    api
-   License <https://github.com/awslabs/aws-data-wrangler/blob/master/LICENSE>
-   Contributing <https://github.com/awslabs/aws-data-wrangler/blob/master/CONTRIBUTING.md>
+   Community Resources <https://github.com/awslabs/aws-data-wrangler#community-resources>
+   Logging <https://github.com/awslabs/aws-data-wrangler#logging>
+   Who uses AWS Data Wrangler? <https://github.com/awslabs/aws-data-wrangler#who-uses-aws-data-wrangler>
+   License <https://github.com/awslabs/aws-data-wrangler/blob/main/LICENSE.txt>
+   Contributing <https://github.com/awslabs/aws-data-wrangler/blob/main/CONTRIBUTING.md>
    Legacy Docs (pre-1.0.0) <https://aws-data-wrangler.readthedocs.io/en/legacy/>

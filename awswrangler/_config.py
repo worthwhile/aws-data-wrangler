@@ -5,18 +5,19 @@ import logging
 import os
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Type, Union, cast
 
-import pandas as pd  # type: ignore
+import botocore.config
+import pandas as pd
 
-from awswrangler import _utils, exceptions
+from awswrangler import exceptions
 
 _logger: logging.Logger = logging.getLogger(__name__)
 
 
-_ConfigValueType = Union[str, bool, int, None]
+_ConfigValueType = Union[str, bool, int, botocore.config.Config, None]
 
 
 class _ConfigArg(NamedTuple):
-    dtype: Type[Union[str, bool, int]]
+    dtype: Type[Union[str, bool, int, botocore.config.Config]]
     nullable: bool
     enforced: bool = False
 
@@ -29,16 +30,38 @@ _CONFIG_ARGS: Dict[str, _ConfigArg] = {
     "database": _ConfigArg(dtype=str, nullable=True),
     "max_cache_query_inspections": _ConfigArg(dtype=int, nullable=False),
     "max_cache_seconds": _ConfigArg(dtype=int, nullable=False),
-    "s3fs_block_size": _ConfigArg(dtype=int, nullable=False, enforced=True),
+    "max_remote_cache_entries": _ConfigArg(dtype=int, nullable=False),
+    "max_local_cache_entries": _ConfigArg(dtype=int, nullable=False),
+    "s3_block_size": _ConfigArg(dtype=int, nullable=False, enforced=True),
+    "workgroup": _ConfigArg(dtype=str, nullable=False, enforced=True),
+    "chunksize": _ConfigArg(dtype=int, nullable=False, enforced=True),
+    # Endpoints URLs
+    "s3_endpoint_url": _ConfigArg(dtype=str, nullable=True, enforced=True),
+    "athena_endpoint_url": _ConfigArg(dtype=str, nullable=True, enforced=True),
+    "sts_endpoint_url": _ConfigArg(dtype=str, nullable=True, enforced=True),
+    "glue_endpoint_url": _ConfigArg(dtype=str, nullable=True, enforced=True),
+    "redshift_endpoint_url": _ConfigArg(dtype=str, nullable=True, enforced=True),
+    "kms_endpoint_url": _ConfigArg(dtype=str, nullable=True, enforced=True),
+    "emr_endpoint_url": _ConfigArg(dtype=str, nullable=True, enforced=True),
+    # Botocore config
+    "botocore_config": _ConfigArg(dtype=botocore.config.Config, nullable=True),
 }
 
 
-class _Config:
+class _Config:  # pylint: disable=too-many-instance-attributes, too-many-public-methods
     """Wrangler's Configuration class."""
 
     def __init__(self) -> None:
         self._loaded_values: Dict[str, _ConfigValueType] = {}
         name: str
+        self.s3_endpoint_url = None
+        self.athena_endpoint_url = None
+        self.sts_endpoint_url = None
+        self.glue_endpoint_url = None
+        self.redshift_endpoint_url = None
+        self.kms_endpoint_url = None
+        self.emr_endpoint_url = None
+        self.botocore_config = None
         for name in _CONFIG_ARGS:
             self._load_config(name=name)
 
@@ -124,7 +147,10 @@ class _Config:
 
     def _reset_item(self, item: str) -> None:
         if item in self._loaded_values:
-            del self._loaded_values[item]
+            if item.endswith("_endpoint_url"):
+                self._loaded_values[item] = None
+            else:
+                del self._loaded_values[item]
         self._load_config(name=item)
 
     def _repr_html_(self) -> Any:
@@ -135,11 +161,13 @@ class _Config:
         if _Config._is_null(value=value):
             if nullable is True:
                 return None
-            exceptions.InvalidArgumentValue(f"{name} configuration does not accept a null value. Please pass {dtype}.")
+            raise exceptions.InvalidArgumentValue(
+                f"{name} configuration does not accept a null value. Please pass {dtype}."
+            )
         try:
             return dtype(value) if isinstance(value, dtype) is False else value
-        except ValueError:
-            raise exceptions.InvalidConfiguration(f"Config {name} must receive a {dtype} value.")
+        except ValueError as ex:
+            raise exceptions.InvalidConfiguration(f"Config {name} must receive a {dtype} value.") from ex
 
     @staticmethod
     def _is_null(value: _ConfigValueType) -> bool:
@@ -206,13 +234,138 @@ class _Config:
         self._set_config_value(key="max_cache_seconds", value=value)
 
     @property
-    def s3fs_block_size(self) -> int:
-        """Property s3fs_block_size."""
-        return cast(int, self["s3fs_block_size"])
+    def max_local_cache_entries(self) -> int:
+        """Property max_local_cache_entries."""
+        return cast(int, self["max_local_cache_entries"])
 
-    @s3fs_block_size.setter
-    def s3fs_block_size(self, value: int) -> None:
-        self._set_config_value(key="s3fs_block_size", value=value)
+    @max_local_cache_entries.setter
+    def max_local_cache_entries(self, value: int) -> None:
+        try:
+            max_remote_cache_entries = cast(int, self["max_remote_cache_entries"])
+        except AttributeError:
+            max_remote_cache_entries = 50
+        if value < max_remote_cache_entries:
+            _logger.warning(
+                "max_remote_cache_entries shouldn't be greater than max_local_cache_entries. "
+                "Therefore max_remote_cache_entries will be set to %s as well.",
+                value,
+            )
+            self._set_config_value(key="max_remote_cache_entries", value=value)
+        self._set_config_value(key="max_local_cache_entries", value=value)
+
+    @property
+    def max_remote_cache_entries(self) -> int:
+        """Property max_remote_cache_entries."""
+        return cast(int, self["max_remote_cache_entries"])
+
+    @max_remote_cache_entries.setter
+    def max_remote_cache_entries(self, value: int) -> None:
+        self._set_config_value(key="max_remote_cache_entries", value=value)
+
+    @property
+    def s3_block_size(self) -> int:
+        """Property s3_block_size."""
+        return cast(int, self["s3_block_size"])
+
+    @s3_block_size.setter
+    def s3_block_size(self, value: int) -> None:
+        self._set_config_value(key="s3_block_size", value=value)
+
+    @property
+    def workgroup(self) -> Optional[str]:
+        """Property workgroup."""
+        return cast(Optional[str], self["workgroup"])
+
+    @workgroup.setter
+    def workgroup(self, value: Optional[str]) -> None:
+        self._set_config_value(key="workgroup", value=value)
+
+    @property
+    def chunksize(self) -> int:
+        """Property chunksize."""
+        return cast(int, self["chunksize"])
+
+    @chunksize.setter
+    def chunksize(self, value: int) -> None:
+        self._set_config_value(key="chunksize", value=value)
+
+    @property
+    def s3_endpoint_url(self) -> Optional[str]:
+        """Property s3_endpoint_url."""
+        return cast(Optional[str], self["s3_endpoint_url"])
+
+    @s3_endpoint_url.setter
+    def s3_endpoint_url(self, value: Optional[str]) -> None:
+        self._set_config_value(key="s3_endpoint_url", value=value)
+
+    @property
+    def athena_endpoint_url(self) -> Optional[str]:
+        """Property athena_endpoint_url."""
+        return cast(Optional[str], self["athena_endpoint_url"])
+
+    @athena_endpoint_url.setter
+    def athena_endpoint_url(self, value: Optional[str]) -> None:
+        self._set_config_value(key="athena_endpoint_url", value=value)
+
+    @property
+    def sts_endpoint_url(self) -> Optional[str]:
+        """Property sts_endpoint_url."""
+        return cast(Optional[str], self["sts_endpoint_url"])
+
+    @sts_endpoint_url.setter
+    def sts_endpoint_url(self, value: Optional[str]) -> None:
+        self._set_config_value(key="sts_endpoint_url", value=value)
+
+    @property
+    def glue_endpoint_url(self) -> Optional[str]:
+        """Property glue_endpoint_url."""
+        return cast(Optional[str], self["glue_endpoint_url"])
+
+    @glue_endpoint_url.setter
+    def glue_endpoint_url(self, value: Optional[str]) -> None:
+        self._set_config_value(key="glue_endpoint_url", value=value)
+
+    @property
+    def redshift_endpoint_url(self) -> Optional[str]:
+        """Property redshift_endpoint_url."""
+        return cast(Optional[str], self["redshift_endpoint_url"])
+
+    @redshift_endpoint_url.setter
+    def redshift_endpoint_url(self, value: Optional[str]) -> None:
+        self._set_config_value(key="redshift_endpoint_url", value=value)
+
+    @property
+    def kms_endpoint_url(self) -> Optional[str]:
+        """Property kms_endpoint_url."""
+        return cast(Optional[str], self["kms_endpoint_url"])
+
+    @kms_endpoint_url.setter
+    def kms_endpoint_url(self, value: Optional[str]) -> None:
+        self._set_config_value(key="kms_endpoint_url", value=value)
+
+    @property
+    def emr_endpoint_url(self) -> Optional[str]:
+        """Property emr_endpoint_url."""
+        return cast(Optional[str], self["emr_endpoint_url"])
+
+    @emr_endpoint_url.setter
+    def emr_endpoint_url(self, value: Optional[str]) -> None:
+        self._set_config_value(key="emr_endpoint_url", value=value)
+
+    @property
+    def botocore_config(self) -> botocore.config.Config:
+        """Property botocore_config."""
+        return cast(Optional[botocore.config.Config], self["botocore_config"])
+
+    @botocore_config.setter
+    def botocore_config(self, value: Optional[botocore.config.Config]) -> None:
+        self._set_config_value(key="botocore_config", value=value)
+
+
+def _insert_str(text: str, token: str, insert: str) -> str:
+    """Insert string into other."""
+    index: int = text.find(token)
+    return text[:index] + insert + text[index:]
 
 
 def _inject_config_doc(doc: Optional[str], available_configs: Tuple[str, ...]) -> str:
@@ -221,20 +374,20 @@ def _inject_config_doc(doc: Optional[str], available_configs: Tuple[str, ...]) -
     if "\n    Parameters" not in doc:
         return doc
     header: str = (
-        "\n    Note\n    ----"
-        "\n    This functions has arguments that can has default values configured globally through "
+        "\n\n    Note\n    ----"
+        "\n    This function has arguments which can be configured globally through "
         "*wr.config* or environment variables:\n\n"
     )
     args: Tuple[str, ...] = tuple(f"    - {x}\n" for x in available_configs)
     args_block: str = "\n".join(args)
     footer: str = (
         "\n    Check out the `Global Configurations Tutorial "
-        "<https://github.com/awslabs/aws-data-wrangler/blob/master/tutorials/"
+        "<https://github.com/awslabs/aws-data-wrangler/blob/main/tutorials/"
         "021%20-%20Global%20Configurations.ipynb>`_"
         " for details.\n"
     )
     insertion: str = header + args_block + footer + "\n\n"
-    return _utils.insert_str(text=doc, token="\n    Parameters", insert=insertion)
+    return _insert_str(text=doc, token="\n    Parameters", insert=insertion)
 
 
 def apply_configs(function: Callable[..., Any]) -> Callable[..., Any]:
@@ -250,9 +403,10 @@ def apply_configs(function: Callable[..., Any]) -> Callable[..., Any]:
                 value: _ConfigValueType = config[name]
                 if name not in args:
                     _logger.debug("Applying default config argument %s with value %s.", name, value)
+                    args[name] = value
                 elif _CONFIG_ARGS[name].enforced is True:
                     _logger.debug("Applying ENFORCED config argument %s with value %s.", name, value)
-                args[name] = value
+                    args[name] = value
         for name, param in signature.parameters.items():
             if param.kind == param.VAR_KEYWORD and name in args:
                 if isinstance(args[name], dict) is False:

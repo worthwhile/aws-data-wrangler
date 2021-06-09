@@ -1,5 +1,5 @@
 # Byte-compiled / optimized / DLL files
-__pycache__/
+*__pycache__/
 *.py[cod]
 *$py.class
 
@@ -47,7 +47,8 @@ nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
-.pytest_cache/
+*.pytest_cache/
+test-reports/
 
 # Translations
 *.mo
@@ -89,8 +90,8 @@ celerybeat-schedule
 
 # Environments
 .env
-.venv
-env/
+*venv*/
+*env/
 venv*/
 ENV/
 env.bak/
@@ -128,9 +129,10 @@ dmypy.json
 output/
 
 # Development
-dev/
+/dev/
 metrics/
 python/
+notes.txt
 
 # SAM
 .aws-sam
@@ -142,3 +144,11 @@ building/lambda/arrow
 /docs/build/
 /docs/source/_build/
 /docs/source/stubs/
+
+# Swap
+*.swp
+
+# CDK
+*package-lock.json
+*.cdk.staging
+*cdk.out

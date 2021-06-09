@@ -4,11 +4,17 @@ API Reference
 * `Amazon S3`_
 * `AWS Glue Catalog`_
 * `Amazon Athena`_
-* `Databases (Amazon Redshift, PostgreSQL, MySQL)`_
+* `Amazon Redshift`_
+* `PostgreSQL`_
+* `MySQL`_
+* `Microsoft SQL Server`_
+* `DynamoDB`_
+* `Amazon Timestream`_
 * `Amazon EMR`_
 * `Amazon CloudWatch Logs`_
 * `Amazon QuickSight`_
 * `AWS STS`_
+* `AWS Secrets Manager`_
 * `Global Configurations`_
 
 Amazon S3
@@ -23,11 +29,14 @@ Amazon S3
     delete_objects
     describe_objects
     does_object_exist
+    download
     get_bucket_region
     list_directories
     list_objects
     merge_datasets
+    merge_upsert_table
     read_csv
+    read_excel
     read_fwf
     read_json
     read_parquet
@@ -36,8 +45,10 @@ Amazon S3
     size_objects
     store_parquet_metadata
     to_csv
+    to_excel
     to_json
     to_parquet
+    upload
     wait_objects_exist
     wait_objects_not_exist
 
@@ -49,13 +60,17 @@ AWS Glue Catalog
 .. autosummary::
     :toctree: stubs
 
+    add_column
     add_csv_partitions
     add_parquet_partitions
     create_csv_table
     create_database
     create_parquet_table
     databases
+    delete_column
     delete_database
+    delete_partitions
+    delete_all_partitions
     delete_table_if_exists
     does_table_exist
     drop_duplicated_columns
@@ -63,7 +78,6 @@ AWS Glue Catalog
     get_columns_comments
     get_csv_partitions
     get_databases
-    get_engine
     get_parquet_partitions
     get_partitions
     get_table_description
@@ -101,24 +115,92 @@ Amazon Athena
     stop_query_execution
     wait_query
 
-Databases (Amazon Redshift, PostgreSQL, MySQL)
-----------------------------------------------
+Amazon Redshift
+---------------
 
-.. currentmodule:: awswrangler.db
+.. currentmodule:: awswrangler.redshift
 
 .. autosummary::
     :toctree: stubs
 
-    copy_files_to_redshift
-    copy_to_redshift
-    get_engine
-    get_redshift_temp_engine
+    connect
+    connect_temp
+    copy
+    copy_from_files
     read_sql_query
     read_sql_table
     to_sql
-    unload_redshift
-    unload_redshift_to_files
-    write_redshift_copy_manifest
+    unload
+    unload_to_files
+
+PostgreSQL
+----------
+
+.. currentmodule:: awswrangler.postgresql
+
+.. autosummary::
+    :toctree: stubs
+
+    connect
+    read_sql_query
+    read_sql_table
+    to_sql
+
+MySQL
+-----
+
+.. currentmodule:: awswrangler.mysql
+
+.. autosummary::
+    :toctree: stubs
+
+    connect
+    read_sql_query
+    read_sql_table
+    to_sql
+
+Microsoft SQL Server
+____________________
+
+.. currentmodule:: awswrangler.sqlserver
+
+.. autosummary::
+    :toctree: stubs
+
+    connect
+    read_sql_query
+    read_sql_table
+    to_sql
+
+DynamoDB
+--------
+
+.. currentmodule:: awswrangler.dynamodb
+
+.. autosummary::
+    :toctree: stubs
+
+    delete_items
+    get_table
+    put_csv
+    put_df
+    put_items
+    put_json
+
+Amazon Timestream
+-----------------
+
+.. currentmodule:: awswrangler.timestream
+
+.. autosummary::
+    :toctree: stubs
+
+    create_database
+    create_table
+    delete_database
+    delete_table
+    query
+    write
 
 Amazon EMR
 ----------
@@ -211,6 +293,26 @@ AWS STS
     get_current_identity_arn
     get_current_identity_name
 
+AWS Secrets Manager
+-------------------
+
+.. currentmodule:: awswrangler.secretsmanager
+
+.. autosummary::
+    :toctree: stubs
+
+    get_secret
+    get_secret_json
+
+Amazon Chime
+-------------------
+
+.. currentmodule:: awswrangler.chime
+
+.. autosummary::
+    :toctree: stubs
+
+    post_message
 
 Global Configurations
 ---------------------

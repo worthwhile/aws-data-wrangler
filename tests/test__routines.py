@@ -14,7 +14,7 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
 
     # Round 1 - Warm up
     df = pd.DataFrame({"c0": [0, None]}, dtype="Int64")
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
         path=path,
         dataset=True,
@@ -26,9 +26,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
         columns_comments={"c0": "0"},
         use_threads=use_threads,
         concurrent_partitioning=concurrent_partitioning,
-    )["paths"]
+    )
     assert wr.catalog.get_table_number_of_versions(table=glue_table, database=glue_database) == 1
-    wr.s3.wait_objects_exist(paths=paths, use_threads=use_threads)
     df2 = wr.athena.read_sql_table(glue_table, glue_database, use_threads=use_threads)
     assert df.shape == df2.shape
     assert df.c0.sum() == df2.c0.sum()
@@ -43,9 +42,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
 
     # Round 2 - Overwrite
     df = pd.DataFrame({"c1": [None, 1, None]}, dtype="Int16")
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
-        path=path,
         dataset=True,
         mode="overwrite",
         database=glue_database,
@@ -55,9 +53,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
         columns_comments={"c1": "1"},
         use_threads=use_threads,
         concurrent_partitioning=concurrent_partitioning,
-    )["paths"]
+    )
     assert wr.catalog.get_table_number_of_versions(table=glue_table, database=glue_database) == 1
-    wr.s3.wait_objects_exist(paths=paths, use_threads=use_threads)
     df2 = wr.athena.read_sql_table(glue_table, glue_database, use_threads=use_threads)
     assert df.shape == df2.shape
     assert df.c1.sum() == df2.c1.sum()
@@ -72,7 +69,7 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
 
     # Round 3 - Append
     df = pd.DataFrame({"c1": [None, 2, None]}, dtype="Int8")
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
         path=path,
         dataset=True,
@@ -84,9 +81,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
         columns_comments={"c1": "1"},
         use_threads=use_threads,
         concurrent_partitioning=concurrent_partitioning,
-    )["paths"]
+    )
     assert wr.catalog.get_table_number_of_versions(table=glue_table, database=glue_database) == 1
-    wr.s3.wait_objects_exist(paths=paths, use_threads=use_threads)
     df2 = wr.athena.read_sql_table(glue_table, glue_database, use_threads=use_threads)
     assert len(df.columns) == len(df2.columns)
     assert len(df.index) * 2 == len(df2.index)
@@ -102,9 +98,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
 
     # Round 4 - Append + New Column
     df = pd.DataFrame({"c2": ["a", None, "b"], "c1": [None, None, None]})
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
-        path=path,
         dataset=True,
         mode="append",
         database=glue_database,
@@ -114,9 +109,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
         columns_comments={"c1": "1", "c2": "2"},
         use_threads=use_threads,
         concurrent_partitioning=concurrent_partitioning,
-    )["paths"]
+    )
     assert wr.catalog.get_table_number_of_versions(table=glue_table, database=glue_database) == 1
-    wr.s3.wait_objects_exist(paths=paths, use_threads=use_threads)
     df2 = wr.athena.read_sql_table(glue_table, glue_database, use_threads=use_threads)
     assert len(df2.columns) == 2
     assert len(df2.index) == 9
@@ -133,7 +127,7 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
 
     # Round 5 - Append + New Column + Wrong Types
     df = pd.DataFrame({"c2": [1], "c3": [True], "c1": ["1"]})
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
         path=path,
         dataset=True,
@@ -145,9 +139,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
         columns_comments={"c1": "1!", "c2": "2!", "c3": "3"},
         use_threads=use_threads,
         concurrent_partitioning=concurrent_partitioning,
-    )["paths"]
+    )
     assert wr.catalog.get_table_number_of_versions(table=glue_table, database=glue_database) == 1
-    wr.s3.wait_objects_exist(paths=paths, use_threads=use_threads)
     df2 = wr.athena.read_sql_table(glue_table, glue_database, use_threads=use_threads)
     assert len(df2.columns) == 3
     assert len(df2.index) == 10
@@ -165,9 +158,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
 
     # Round 6 - Overwrite Partitioned
     df = pd.DataFrame({"c0": ["foo", None], "c1": [0, 1]})
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
-        path=path,
         dataset=True,
         mode="overwrite",
         database=glue_database,
@@ -178,9 +170,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
         columns_comments={"c0": "zero", "c1": "one"},
         use_threads=use_threads,
         concurrent_partitioning=concurrent_partitioning,
-    )["paths"]
+    )
     assert wr.catalog.get_table_number_of_versions(table=glue_table, database=glue_database) == 1
-    wr.s3.wait_objects_exist(paths=paths, use_threads=use_threads)
     df2 = wr.athena.read_sql_table(glue_table, glue_database, use_threads=use_threads)
     assert df.shape == df2.shape
     assert df.c1.sum() == df2.c1.sum()
@@ -196,7 +187,7 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
 
     # Round 7 - Overwrite Partitions
     df = pd.DataFrame({"c0": [None, None], "c1": [0, 2]})
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
         path=path,
         dataset=True,
@@ -209,9 +200,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
         columns_comments={"c0": "zero", "c1": "one"},
         concurrent_partitioning=concurrent_partitioning,
         use_threads=use_threads,
-    )["paths"]
+    )
     assert wr.catalog.get_table_number_of_versions(table=glue_table, database=glue_database) == 1
-    wr.s3.wait_objects_exist(paths=paths, use_threads=use_threads)
     df2 = wr.athena.read_sql_table(glue_table, glue_database, use_threads=use_threads)
     assert len(df2.columns) == 2
     assert len(df2.index) == 3
@@ -228,9 +218,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
 
     # Round 8 - Overwrite Partitions + New Column + Wrong Type
     df = pd.DataFrame({"c0": [1, 2], "c1": ["1", "3"], "c2": [True, False]})
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
-        path=path,
         dataset=True,
         mode="overwrite_partitions",
         database=glue_database,
@@ -241,9 +230,8 @@ def test_routine_0(glue_database, glue_table, path, use_threads, concurrent_part
         columns_comments={"c0": "zero", "c1": "one", "c2": "two"},
         use_threads=use_threads,
         concurrent_partitioning=concurrent_partitioning,
-    )["paths"]
+    )
     assert wr.catalog.get_table_number_of_versions(table=glue_table, database=glue_database) == 1
-    wr.s3.wait_objects_exist(paths=paths, use_threads=use_threads)
     df2 = wr.athena.read_sql_table(glue_table, glue_database, use_threads=use_threads)
     assert len(df2.columns) == 3
     assert len(df2.index) == 4
@@ -264,8 +252,7 @@ def test_routine_1(glue_database, glue_table, path):
 
     # Round 1 - Warm up
     df = pd.DataFrame({"c0": [0, None]}, dtype="Int64")
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite")["paths"]
-    wr.s3.wait_objects_exist(paths=paths)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite")
     wr.s3.store_parquet_metadata(
         path=path,
         dataset=True,
@@ -291,8 +278,7 @@ def test_routine_1(glue_database, glue_table, path):
 
     # Round 2 - Overwrite
     df = pd.DataFrame({"c1": [None, 1, None]}, dtype="Int16")
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite")["paths"]
-    wr.s3.wait_objects_exist(paths=paths)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite")
     wr.s3.store_parquet_metadata(
         path=path,
         dataset=True,
@@ -318,8 +304,7 @@ def test_routine_1(glue_database, glue_table, path):
 
     # Round 3 - Append
     df = pd.DataFrame({"c1": [None, 2, None]}, dtype="Int16")
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, mode="append")["paths"]
-    wr.s3.wait_objects_exist(paths=paths)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, mode="append")
     wr.s3.store_parquet_metadata(
         path=path,
         dataset=True,
@@ -347,8 +332,7 @@ def test_routine_1(glue_database, glue_table, path):
     # Round 4 - Append + New Column
     df = pd.DataFrame({"c2": ["a", None, "b"], "c1": [None, 1, None]})
     df["c1"] = df["c1"].astype("Int16")
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, mode="append")["paths"]
-    wr.s3.wait_objects_exist(paths=paths)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, mode="append")
     wr.s3.store_parquet_metadata(
         path=path,
         dataset=True,
@@ -376,8 +360,7 @@ def test_routine_1(glue_database, glue_table, path):
 
     # Round 5 - Overwrite Partitioned
     df = pd.DataFrame({"c0": ["foo", None], "c1": [0, 1]})
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite", partition_cols=["c1"])["paths"]
-    wr.s3.wait_objects_exist(paths=paths)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite", partition_cols=["c1"])
     wr.s3.store_parquet_metadata(
         path=path,
         dataset=True,
@@ -404,10 +387,7 @@ def test_routine_1(glue_database, glue_table, path):
 
     # Round 6 - Overwrite Partitions
     df = pd.DataFrame({"c0": [None, "boo"], "c1": [0, 2]})
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite_partitions", partition_cols=["c1"])[
-        "paths"
-    ]
-    wr.s3.wait_objects_exist(paths=paths)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite_partitions", partition_cols=["c1"])
     wr.s3.store_parquet_metadata(
         path=path,
         dataset=True,
@@ -435,10 +415,7 @@ def test_routine_1(glue_database, glue_table, path):
 
     # Round 7 - Overwrite Partitions + New Column
     df = pd.DataFrame({"c0": ["bar", None], "c1": [1, 3], "c2": [True, False]})
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite_partitions", partition_cols=["c1"])[
-        "paths"
-    ]
-    wr.s3.wait_objects_exist(paths=paths)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, mode="overwrite_partitions", partition_cols=["c1"])
     wr.s3.store_parquet_metadata(
         path=path,
         dataset=True,

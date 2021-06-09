@@ -1,6 +1,6 @@
 """Amazon Glue Catalog Module."""
 
-from awswrangler.catalog._add import add_csv_partitions, add_parquet_partitions  # noqa
+from awswrangler.catalog._add import add_column, add_csv_partitions, add_parquet_partitions  # noqa
 from awswrangler.catalog._create import (  # noqa
     _create_csv_table,
     _create_parquet_table,
@@ -10,7 +10,13 @@ from awswrangler.catalog._create import (  # noqa
     overwrite_table_parameters,
     upsert_table_parameters,
 )
-from awswrangler.catalog._delete import delete_database, delete_table_if_exists  # noqa
+from awswrangler.catalog._delete import (  # noqa
+    delete_all_partitions,
+    delete_column,
+    delete_database,
+    delete_partitions,
+    delete_table_if_exists,
+)
 from awswrangler.catalog._get import (  # noqa
     _get_table_input,
     databases,
@@ -18,7 +24,6 @@ from awswrangler.catalog._get import (  # noqa
     get_connection,
     get_csv_partitions,
     get_databases,
-    get_engine,
     get_parquet_partitions,
     get_partitions,
     get_table_description,
@@ -42,9 +47,11 @@ from awswrangler.catalog._utils import (  # noqa
 )
 
 __all__ = [
+    "add_column",
     "add_csv_partitions",
     "add_parquet_partitions",
     "does_table_exist",
+    "delete_column",
     "drop_duplicated_columns",
     "extract_athena_types",
     "sanitize_column_name",
@@ -63,7 +70,6 @@ __all__ = [
     "get_connection",
     "get_csv_partitions",
     "get_databases",
-    "get_engine",
     "get_parquet_partitions",
     "get_partitions",
     "get_table_description",
@@ -78,4 +84,6 @@ __all__ = [
     "tables",
     "delete_database",
     "delete_table_if_exists",
+    "delete_partitions",
+    "delete_all_partitions",
 ]

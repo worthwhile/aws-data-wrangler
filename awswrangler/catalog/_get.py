@@ -1,14 +1,14 @@
 """AWS Glue Catalog Get Module."""
 # pylint: disable=redefined-outer-name
 
+import base64
 import itertools
 import logging
 from typing import Any, Dict, Iterator, List, Optional, Union, cast
-from urllib.parse import quote_plus as _quote_plus
 
-import boto3  # type: ignore
-import pandas as pd  # type: ignore
-import sqlalchemy  # type: ignore
+import boto3
+import botocore.exceptions
+import pandas as pd
 
 from awswrangler import _utils, exceptions
 from awswrangler._config import apply_configs
@@ -119,7 +119,7 @@ def get_table_types(
     Examples
     --------
     >>> import awswrangler as wr
-    >>> wr.catalog.get_table_types(database='default', name='my_table')
+    >>> wr.catalog.get_table_types(database='default', table='my_table')
     {'col0': 'int', 'col1': double}
 
     """
@@ -424,7 +424,7 @@ def table(
     Examples
     --------
     >>> import awswrangler as wr
-    >>> df_table = wr.catalog.table(database='default', name='my_table')
+    >>> df_table = wr.catalog.table(database='default', table='my_table')
 
     """
     client_glue: boto3.client = _utils.client(service_name="glue", session=boto3_session)
@@ -479,8 +479,8 @@ def get_table_location(database: str, table: str, boto3_session: Optional[boto3.
     res: Dict[str, Any] = client_glue.get_table(DatabaseName=database, Name=table)
     try:
         return cast(str, res["Table"]["StorageDescriptor"]["Location"])
-    except KeyError:
-        raise exceptions.InvalidTable(f"{database}.{table}")
+    except KeyError as ex:
+        raise exceptions.InvalidTable(f"{database}.{table}") from ex
 
 
 def get_connection(
@@ -511,67 +511,22 @@ def get_connection(
 
     """
     client_glue: boto3.client = _utils.client(service_name="glue", session=boto3_session)
-    return cast(
-        Dict[str, Any],
-        client_glue.get_connection(**_catalog_id(catalog_id=catalog_id, Name=name, HidePassword=False))["Connection"],
-    )
 
+    res = _utils.try_it(
+        f=client_glue.get_connection,
+        ex=botocore.exceptions.ClientError,
+        ex_code="ThrottlingException",
+        max_num_tries=3,
+        **_catalog_id(catalog_id=catalog_id, Name=name, HidePassword=False),
+    )["Connection"]
 
-def get_engine(
-    connection: str,
-    catalog_id: Optional[str] = None,
-    boto3_session: Optional[boto3.Session] = None,
-    **sqlalchemy_kwargs: Any,
-) -> sqlalchemy.engine.Engine:
-    """Return a SQLAlchemy Engine from a Glue Catalog Connection.
-
-    Only Redshift, PostgreSQL and MySQL are supported.
-
-    Parameters
-    ----------
-    connection : str
-        Connection name.
-    catalog_id : str, optional
-        The ID of the Data Catalog from which to retrieve Databases.
-        If none is provided, the AWS account ID is used by default.
-    boto3_session : boto3.Session(), optional
-        Boto3 Session. The default boto3 session will be used if boto3_session receive None.
-    sqlalchemy_kwargs
-        keyword arguments forwarded to sqlalchemy.create_engine().
-        https://docs.sqlalchemy.org/en/13/core/engines.html
-
-    Returns
-    -------
-    sqlalchemy.engine.Engine
-        SQLAlchemy Engine.
-
-    Examples
-    --------
-    >>> import awswrangler as wr
-    >>> res = wr.catalog.get_engine(name='my_connection')
-
-    """
-    details: Dict[str, Any] = get_connection(name=connection, catalog_id=catalog_id, boto3_session=boto3_session)[
-        "ConnectionProperties"
-    ]
-    db_type: str = details["JDBC_CONNECTION_URL"].split(":")[1].lower()
-    host: str = details["JDBC_CONNECTION_URL"].split(":")[2].replace("/", "")
-    port, database = details["JDBC_CONNECTION_URL"].split(":")[3].split("/")
-    user: str = _quote_plus(details["USERNAME"])
-    password: str = _quote_plus(details["PASSWORD"])
-    if db_type == "postgresql":
-        _utils.ensure_postgresql_casts()
-    if db_type in ("redshift", "postgresql"):
-        conn_str: str = f"{db_type}+psycopg2://{user}:{password}@{host}:{port}/{database}"
-        sqlalchemy_kwargs["executemany_mode"] = "values"
-        sqlalchemy_kwargs["executemany_values_page_size"] = 100_000
-        return sqlalchemy.create_engine(conn_str, **sqlalchemy_kwargs)
-    if db_type == "mysql":
-        conn_str = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
-        return sqlalchemy.create_engine(conn_str, **sqlalchemy_kwargs)
-    raise exceptions.InvalidDatabaseType(
-        f"{db_type} is not a valid Database type." f" Only Redshift, PostgreSQL and MySQL are supported."
-    )
+    if "ENCRYPTED_PASSWORD" in res["ConnectionProperties"]:
+        client_kms = _utils.client(service_name="kms", session=boto3_session)
+        pwd = client_kms.decrypt(CiphertextBlob=base64.b64decode(res["ConnectionProperties"]["ENCRYPTED_PASSWORD"]))[
+            "Plaintext"
+        ].decode("utf-8")
+        res["ConnectionProperties"]["PASSWORD"] = pwd
+    return cast(Dict[str, Any], res)
 
 
 @apply_configs

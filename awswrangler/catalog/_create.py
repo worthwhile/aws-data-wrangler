@@ -1,15 +1,15 @@
 """AWS Glue Catalog Module."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-import boto3  # type: ignore
+import boto3
 
 from awswrangler import _utils, exceptions
 from awswrangler._config import apply_configs
 from awswrangler.catalog._definitions import _csv_table_definition, _parquet_table_definition
-from awswrangler.catalog._delete import delete_table_if_exists
-from awswrangler.catalog._get import _get_partitions, _get_table_input
+from awswrangler.catalog._delete import delete_all_partitions, delete_table_if_exists
+from awswrangler.catalog._get import _get_table_input
 from awswrangler.catalog._utils import _catalog_id, sanitize_column_name, sanitize_table_name
 
 _logger: logging.Logger = logging.getLogger(__name__)
@@ -118,21 +118,8 @@ def _create_table(  # pylint: disable=too-many-branches,too-many-statements
             f"{mode} is not a valid mode. It must be 'overwrite', 'append' or 'overwrite_partitions'."
         )
     if table_exist is True and mode == "overwrite":
-        _logger.debug("Fetching existing partitions...")
-        partitions_values: List[List[str]] = list(
-            _get_partitions(database=database, table=table, boto3_session=session, catalog_id=catalog_id).values()
-        )
-        _logger.debug("Number of old partitions: %s", len(partitions_values))
-        _logger.debug("Deleting existing partitions...")
-        client_glue.batch_delete_partition(
-            **_catalog_id(
-                catalog_id=catalog_id,
-                DatabaseName=database,
-                TableName=table,
-                PartitionsToDelete=[{"Values": v} for v in partitions_values],
-            )
-        )
-        _logger.debug("Updating table...")
+        delete_all_partitions(table=table, database=database, catalog_id=catalog_id, boto3_session=session)
+        _logger.debug("Updating table (%s)...", mode)
         client_glue.update_table(
             **_catalog_id(
                 catalog_id=catalog_id, DatabaseName=database, TableInput=table_input, SkipArchive=skip_archive
@@ -140,6 +127,7 @@ def _create_table(  # pylint: disable=too-many-branches,too-many-statements
         )
     elif (table_exist is True) and (mode in ("append", "overwrite_partitions", "update")):
         if mode == "update":
+            _logger.debug("Updating table (%s)...", mode)
             client_glue.update_table(
                 **_catalog_id(
                     catalog_id=catalog_id, DatabaseName=database, TableInput=table_input, SkipArchive=skip_archive
@@ -147,17 +135,35 @@ def _create_table(  # pylint: disable=too-many-branches,too-many-statements
             )
     elif table_exist is False:
         try:
+            _logger.debug("Creating table (%s)...", mode)
             client_glue.create_table(
                 **_catalog_id(catalog_id=catalog_id, DatabaseName=database, TableInput=table_input)
             )
-        except client_glue.exceptions.AlreadyExistsException as ex:
+        except client_glue.exceptions.AlreadyExistsException:
             if mode == "overwrite":
-                delete_table_if_exists(database=database, table=table, boto3_session=session, catalog_id=catalog_id)
-                client_glue.create_table(
-                    **_catalog_id(catalog_id=catalog_id, DatabaseName=database, TableInput=table_input)
+                _utils.try_it(
+                    f=_overwrite_table,
+                    ex=client_glue.exceptions.AlreadyExistsException,
+                    client_glue=client_glue,
+                    catalog_id=catalog_id,
+                    database=database,
+                    table=table,
+                    table_input=table_input,
+                    boto3_session=boto3_session,
                 )
-            else:
-                raise ex
+    _logger.debug("Leaving table as is (%s)...", mode)
+
+
+def _overwrite_table(
+    client_glue: boto3.client,
+    catalog_id: Optional[str],
+    database: str,
+    table: str,
+    table_input: Dict[str, Any],
+    boto3_session: boto3.Session,
+) -> None:
+    delete_table_if_exists(database=database, table=table, boto3_session=boto3_session, catalog_id=catalog_id)
+    client_glue.create_table(**_catalog_id(catalog_id=catalog_id, DatabaseName=database, TableInput=table_input))
 
 
 def _upsert_table_parameters(
@@ -209,6 +215,7 @@ def _create_parquet_table(
     path: str,
     columns_types: Dict[str, str],
     partitions_types: Optional[Dict[str, str]],
+    bucketing_info: Optional[Tuple[List[str], int]],
     catalog_id: Optional[str],
     compression: Optional[str],
     description: Optional[str],
@@ -231,25 +238,23 @@ def _create_parquet_table(
     table_input: Dict[str, Any]
     if (catalog_table_input is not None) and (mode in ("append", "overwrite_partitions")):
         table_input = catalog_table_input
-        updated: bool = False
         catalog_cols: Dict[str, str] = {x["Name"]: x["Type"] for x in table_input["StorageDescriptor"]["Columns"]}
         for c, t in columns_types.items():
             if c not in catalog_cols:
                 _logger.debug("New column %s with type %s.", c, t)
                 table_input["StorageDescriptor"]["Columns"].append({"Name": c, "Type": t})
-                updated = True
+                mode = "update"
             elif t != catalog_cols[c]:  # Data type change detected!
                 raise exceptions.InvalidArgumentValue(
-                    f"Data type change detected on column {c}. Old type: {catalog_cols[c]}. New type {t}."
+                    f"Data type change detected on column {c} (Old type: {catalog_cols[c]} / New type {t})."
                 )
-        if updated is True:
-            mode = "update"
     else:
         table_input = _parquet_table_definition(
             table=table,
             path=path,
             columns_types=columns_types,
             partitions_types=partitions_types,
+            bucketing_info=bucketing_info,
             compression=compression,
         )
     table_exist: bool = catalog_table_input is not None
@@ -282,6 +287,7 @@ def _create_csv_table(
     path: str,
     columns_types: Dict[str, str],
     partitions_types: Optional[Dict[str, str]],
+    bucketing_info: Optional[Tuple[List[str], int]],
     description: Optional[str],
     compression: Optional[str],
     parameters: Optional[Dict[str, str]],
@@ -290,6 +296,8 @@ def _create_csv_table(
     catalog_versioning: bool,
     sep: str,
     skip_header_line_count: Optional[int],
+    serde_library: Optional[str],
+    serde_parameters: Optional[Dict[str, str]],
     boto3_session: Optional[boto3.Session],
     projection_enabled: bool,
     projection_types: Optional[Dict[str, str]],
@@ -319,9 +327,12 @@ def _create_csv_table(
             path=path,
             columns_types=columns_types,
             partitions_types=partitions_types,
+            bucketing_info=bucketing_info,
             compression=compression,
             sep=sep,
             skip_header_line_count=skip_header_line_count,
+            serde_library=serde_library,
+            serde_parameters=serde_parameters,
         )
     table_exist: bool = catalog_table_input is not None
     _logger.debug("table_exist: %s", table_exist)
@@ -466,6 +477,7 @@ def create_database(
     name: str,
     description: Optional[str] = None,
     catalog_id: Optional[str] = None,
+    exist_ok: bool = False,
     boto3_session: Optional[boto3.Session] = None,
 ) -> None:
     """Create a database in AWS Glue Catalog.
@@ -479,6 +491,9 @@ def create_database(
     catalog_id : str, optional
         The ID of the Data Catalog from which to retrieve Databases.
         If none is provided, the AWS account ID is used by default.
+    exist_ok : bool
+        If set to True will not raise an Exception if a Database with the same already exists.
+        In this case the description will be updated if it is different from the current one.
     boto3_session : boto3.Session(), optional
         Boto3 Session. The default boto3 session will be used if boto3_session receive None.
 
@@ -494,16 +509,19 @@ def create_database(
     ...     name='awswrangler_test'
     ... )
     """
-    args: Dict[str, str] = {}
     client_glue: boto3.client = _utils.client(service_name="glue", session=boto3_session)
-    args["Name"] = name
+    args: Dict[str, str] = {"Name": name}
     if description is not None:
         args["Description"] = description
 
-    if catalog_id is not None:
-        client_glue.create_database(CatalogId=catalog_id, DatabaseInput=args)
-    else:
-        client_glue.create_database(DatabaseInput=args)
+    try:
+        r = client_glue.get_database(Name=name)
+        if not exist_ok:
+            raise exceptions.AlreadyExists(f"Database {name} already exists and <exist_ok> is set to False.")
+        if description and description != r["Database"].get("Description", ""):
+            client_glue.update_database(**_catalog_id(catalog_id=catalog_id, Name=name, DatabaseInput=args))
+    except client_glue.exceptions.EntityNotFoundException:
+        client_glue.create_database(**_catalog_id(catalog_id=catalog_id, DatabaseInput=args))
 
 
 @apply_configs
@@ -513,6 +531,7 @@ def create_parquet_table(
     path: str,
     columns_types: Dict[str, str],
     partitions_types: Optional[Dict[str, str]] = None,
+    bucketing_info: Optional[Tuple[List[str], int]] = None,
     catalog_id: Optional[str] = None,
     compression: Optional[str] = None,
     description: Optional[str] = None,
@@ -541,9 +560,13 @@ def create_parquet_table(
     path : str
         Amazon S3 path (e.g. s3://bucket/prefix/).
     columns_types: Dict[str, str]
-        Dictionary with keys as column names and vales as data types (e.g. {'col0': 'bigint', 'col1': 'double'}).
+        Dictionary with keys as column names and values as data types (e.g. {'col0': 'bigint', 'col1': 'double'}).
     partitions_types: Dict[str, str], optional
         Dictionary with keys as partition names and values as data types (e.g. {'col2': 'date'}).
+    bucketing_info: Tuple[List[str], int], optional
+        Tuple consisting of the column names used for bucketing as the first element and the number of buckets as the
+        second element.
+        Only `str`, `int` and `bool` are supported as column data types for bucketing.
     catalog_id : str, optional
         The ID of the Data Catalog from which to retrieve Databases.
         If none is provided, the AWS account ID is used by default.
@@ -616,6 +639,7 @@ def create_parquet_table(
         path=path,
         columns_types=columns_types,
         partitions_types=partitions_types,
+        bucketing_info=bucketing_info,
         catalog_id=catalog_id,
         compression=compression,
         description=description,
@@ -641,6 +665,7 @@ def create_csv_table(
     path: str,
     columns_types: Dict[str, str],
     partitions_types: Optional[Dict[str, str]] = None,
+    bucketing_info: Optional[Tuple[List[str], int]] = None,
     compression: Optional[str] = None,
     description: Optional[str] = None,
     parameters: Optional[Dict[str, str]] = None,
@@ -649,6 +674,8 @@ def create_csv_table(
     catalog_versioning: bool = False,
     sep: str = ",",
     skip_header_line_count: Optional[int] = None,
+    serde_library: Optional[str] = None,
+    serde_parameters: Optional[Dict[str, str]] = None,
     boto3_session: Optional[boto3.Session] = None,
     projection_enabled: bool = False,
     projection_types: Optional[Dict[str, str]] = None,
@@ -658,7 +685,7 @@ def create_csv_table(
     projection_digits: Optional[Dict[str, str]] = None,
     catalog_id: Optional[str] = None,
 ) -> None:
-    """Create a CSV Table (Metadata Only) in the AWS Glue Catalog.
+    r"""Create a CSV Table (Metadata Only) in the AWS Glue Catalog.
 
     'https://docs.aws.amazon.com/athena/latest/ug/data-types.html'
 
@@ -671,9 +698,13 @@ def create_csv_table(
     path : str
         Amazon S3 path (e.g. s3://bucket/prefix/).
     columns_types: Dict[str, str]
-        Dictionary with keys as column names and vales as data types (e.g. {'col0': 'bigint', 'col1': 'double'}).
+        Dictionary with keys as column names and values as data types (e.g. {'col0': 'bigint', 'col1': 'double'}).
     partitions_types: Dict[str, str], optional
         Dictionary with keys as partition names and values as data types (e.g. {'col2': 'date'}).
+    bucketing_info: Tuple[List[str], int], optional
+        Tuple consisting of the column names used for bucketing as the first element and the number of buckets as the
+        second element.
+        Only `str`, `int` and `bool` are supported as column data types for bucketing.
     compression : str, optional
         Compression style (``None``, ``gzip``, etc).
     description : str, optional
@@ -690,6 +721,13 @@ def create_csv_table(
         String of length 1. Field delimiter for the output file.
     skip_header_line_count : Optional[int]
         Number of Lines to skip regarding to the header.
+    serde_library : Optional[str]
+        Specifies the SerDe Serialization library which will be used. You need to provide the Class library name
+        as a string.
+        If no library is provided the default is `org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe`.
+    serde_parameters : Optional[str]
+        Dictionary of initialization parameters for the SerDe.
+        The default is `{"field.delim": sep, "escape.delim": "\\"}`.
     projection_enabled : bool
         Enable Partition Projection on Athena (https://docs.aws.amazon.com/athena/latest/ug/partition-projection.html)
     projection_types : Optional[Dict[str, str]]
@@ -750,6 +788,7 @@ def create_csv_table(
         path=path,
         columns_types=columns_types,
         partitions_types=partitions_types,
+        bucketing_info=bucketing_info,
         catalog_id=catalog_id,
         compression=compression,
         description=description,
@@ -767,4 +806,6 @@ def create_csv_table(
         catalog_table_input=catalog_table_input,
         sep=sep,
         skip_header_line_count=skip_header_line_count,
+        serde_library=serde_library,
+        serde_parameters=serde_parameters,
     )

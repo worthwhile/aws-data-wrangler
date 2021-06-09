@@ -11,7 +11,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 import awswrangler as wr
-from awswrangler.exceptions import EmptyDataFrame, InvalidArgumentCombination
+from awswrangler.exceptions import EmptyDataFrame, InvalidArgumentCombination, InvalidArgumentValue
 
 from ._utils import ensure_data_types, get_df_csv, get_df_list
 
@@ -56,6 +56,18 @@ def moto_glue():
         yield glue
 
 
+@pytest.fixture(scope="function")
+def moto_dynamodb():
+    with moto.mock_dynamodb2():
+        dynamodb = boto3.resource("dynamodb")
+        dynamodb.create_table(
+            TableName="table",
+            KeySchema=[{"AttributeName": "key", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "key", "AttributeType": "N"}],
+        )
+        yield dynamodb
+
+
 def get_content_md5(desc: dict):
     result = desc.get("ResponseMetadata").get("HTTPHeaders").get("content-md5")
     return result
@@ -93,7 +105,6 @@ def test_list_directories_succeed(moto_s3):
 
 
 def test_describe_no_object_succeed(moto_s3):
-
     desc = wr.s3.describe_objects("s3://bucket")
 
     assert isinstance(desc, dict)
@@ -234,6 +245,67 @@ def test_csv(moto_s3):
     assert len(df.columns) == 10
 
 
+def test_download_file(moto_s3, tmp_path):
+    bucket = "bucket"
+    key = "foo.tmp"
+    content = b"foo"
+
+    s3_object = moto_s3.Object(bucket, key)
+    s3_object.put(Body=content)
+
+    path = "s3://{}/{}".format(bucket, key)
+    local_file = tmp_path / key
+    wr.s3.download(path=path, local_file=str(local_file))
+    assert local_file.read_bytes() == content
+
+
+def test_download_fileobj(moto_s3, tmp_path):
+    bucket = "bucket"
+    key = "foo.tmp"
+    content = b"foo"
+
+    s3_object = moto_s3.Object(bucket, key)
+    s3_object.put(Body=content)
+
+    path = "s3://{}/{}".format(bucket, key)
+    local_file = tmp_path / key
+
+    with open(local_file, "wb") as local_f:
+        wr.s3.download(path=path, local_file=local_f)
+    assert local_file.read_bytes() == content
+
+
+def test_upload_file(moto_s3, tmp_path):
+    bucket = "bucket"
+    key = "foo.tmp"
+    content = b"foo"
+
+    path = "s3://{}/{}".format(bucket, key)
+    local_file = tmp_path / key
+
+    local_file.write_bytes(content)
+    wr.s3.upload(local_file=str(local_file), path=path)
+
+    s3_object = moto_s3.Object(bucket, key)
+    assert s3_object.get()["Body"].read() == content
+
+
+def test_upload_fileobj(moto_s3, tmp_path):
+    bucket = "bucket"
+    key = "foo.tmp"
+    content = b"foo"
+
+    path = "s3://{}/{}".format(bucket, key)
+    local_file = tmp_path / key
+
+    local_file.write_bytes(content)
+    with open(local_file, "rb") as local_f:
+        wr.s3.upload(local_file=local_f, path=path)
+
+    s3_object = moto_s3.Object(bucket, key)
+    assert s3_object.get()["Body"].read() == content
+
+
 def test_read_csv_with_chucksize_and_pandas_arguments(moto_s3):
     path = "s3://bucket/test.csv"
     wr.s3.to_csv(df=get_df_csv(), path=path, index=False)
@@ -244,15 +316,13 @@ def test_read_csv_with_chucksize_and_pandas_arguments(moto_s3):
 
 
 @mock.patch("pandas.read_csv")
-@mock.patch("s3fs.S3FileSystem.open")
-def test_read_csv_pass_pandas_arguments_and_encoding_succeed(mock_open, mock_read_csv, moto_s3):
+def test_read_csv_pass_pandas_arguments_and_encoding_succeed(mock_read_csv, moto_s3):
     bucket = "bucket"
     key = "foo/foo.csv"
     path = "s3://{}/{}".format(bucket, key)
     s3_object = moto_s3.Object(bucket, key)
     s3_object.put(Body=b"foo")
     wr.s3.read_csv(path=path, encoding="ISO-8859-1", sep=",", lineterminator="\r\n")
-    mock_open.assert_called_with(path="s3://bucket/foo/foo.csv", mode="r", encoding="ISO-8859-1", newline="\r\n")
     mock_read_csv.assert_called_with(ANY, compression=None, encoding="ISO-8859-1", sep=",", lineterminator="\r\n")
 
 
@@ -429,3 +499,24 @@ def test_glue_get_partition(moto_glue):
     assert partition_value == values
     parquet_partition_value = wr.catalog.get_parquet_partitions(database_name, table_name)
     assert parquet_partition_value == values
+
+
+def test_dynamodb_basic_usage(moto_dynamodb):
+    table_name = "table"
+    items = [{"key": 1}, {"key": 2, "my_value": "Hello"}]
+
+    wr.dynamodb.put_items(items=items, table_name=table_name)
+    table = wr.dynamodb.get_table(table_name=table_name)
+    assert table.item_count == len(items)
+
+    wr.dynamodb.delete_items(items=items, table_name=table_name)
+    table = wr.dynamodb.get_table(table_name=table_name)
+    assert table.item_count == 0
+
+
+def test_dynamodb_fail_on_invalid_items(moto_dynamodb):
+    table_name = "table"
+    items = [{"key": 1}, {"id": 2}]
+
+    with pytest.raises(InvalidArgumentValue):
+        wr.dynamodb.put_items(items=items, table_name=table_name)

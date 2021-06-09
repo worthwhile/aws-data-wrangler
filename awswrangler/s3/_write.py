@@ -3,13 +3,20 @@
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd  # type: ignore
+import pandas as pd
 
 from awswrangler import _data_types, _utils, catalog, exceptions
 
 _logger: logging.Logger = logging.getLogger(__name__)
 
-_COMPRESSION_2_EXT: Dict[Optional[str], str] = {None: "", "gzip": ".gz", "snappy": ".snappy"}
+_COMPRESSION_2_EXT: Dict[Optional[str], str] = {
+    None: "",
+    "gzip": ".gz",
+    "snappy": ".snappy",
+    "bz2": ".bz2",
+    "xz": ".xz",
+    "zip": ".zip",
+}
 
 
 def _extract_dtypes_from_table_input(table_input: Dict[str, Any]) -> Dict[str, str]:
@@ -38,9 +45,11 @@ def _apply_dtype(
 def _validate_args(
     df: pd.DataFrame,
     table: Optional[str],
+    database: Optional[str],
     dataset: bool,
-    path: str,
+    path: Optional[str],
     partition_cols: Optional[List[str]],
+    bucketing_info: Optional[Tuple[List[str], int]],
     mode: Optional[str],
     description: Optional[str],
     parameters: Optional[Dict[str, str]],
@@ -49,12 +58,16 @@ def _validate_args(
     if df.empty is True:
         raise exceptions.EmptyDataFrame()
     if dataset is False:
+        if path is None:
+            raise exceptions.InvalidArgumentValue("If dataset is False, the `path` argument must be passed.")
         if path.endswith("/"):
             raise exceptions.InvalidArgumentValue(
-                "If <dataset=False>, the argument <path> should be a object path, not a directory."
+                "If <dataset=False>, the argument <path> should be a key, not a prefix."
             )
         if partition_cols:
             raise exceptions.InvalidArgumentCombination("Please, pass dataset=True to be able to use partition_cols.")
+        if bucketing_info:
+            raise exceptions.InvalidArgumentCombination("Please, pass dataset=True to be able to use bucketing_info.")
         if mode is not None:
             raise exceptions.InvalidArgumentCombination("Please pass dataset=True to be able to use mode.")
         if any(arg is not None for arg in (table, description, parameters, columns_comments)):
@@ -63,6 +76,19 @@ def _validate_args(
                 "arguments: database, table, description, parameters, "
                 "columns_comments."
             )
+    elif (database is None) != (table is None):
+        raise exceptions.InvalidArgumentCombination(
+            "Arguments database and table must be passed together. If you want to store your dataset metadata in "
+            "the Glue Catalog, please ensure you are passing both."
+        )
+    elif all(x is None for x in [path, database, table]):
+        raise exceptions.InvalidArgumentCombination(
+            "You must specify a `path` if dataset is True and database/table are not enabled."
+        )
+    elif bucketing_info and bucketing_info[1] <= 0:
+        raise exceptions.InvalidArgumentValue(
+            "Please pass a value greater than 1 for the number of buckets for bucketing."
+        )
 
 
 def _sanitize(

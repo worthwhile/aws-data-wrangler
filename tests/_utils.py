@@ -2,6 +2,7 @@ import random
 import time
 from datetime import datetime
 from decimal import Decimal
+from typing import Iterator
 
 import boto3
 import botocore.exceptions
@@ -24,7 +25,7 @@ def get_df():
             "iint32": [1, None, 2],
             "iint64": [1, None, 2],
             "float": [0.0, None, 1.1],
-            "double": [0.0, None, 1.1],
+            "ddouble": [0.0, None, 1.1],
             "decimal": [Decimal((0, (1, 9, 9), -2)), None, Decimal((0, (1, 9, 0), -2))],
             "string_object": ["foo", None, "boo"],
             "string": ["foo", None, "boo"],
@@ -55,7 +56,7 @@ def get_df_list():
             "iint32": [1, None, 2],
             "iint64": [1, None, 2],
             "float": [0.0, None, 1.1],
-            "double": [0.0, None, 1.1],
+            "ddouble": [0.0, None, 1.1],
             "decimal": [Decimal((0, (1, 9, 9), -2)), None, Decimal((0, (1, 9, 0), -2))],
             "string_object": ["foo", None, "boo"],
             "string": ["foo", None, "boo"],
@@ -89,7 +90,7 @@ def get_df_cast():
             "iint32": [None, None, None],
             "iint64": [None, None, None],
             "float": [None, None, None],
-            "double": [None, None, None],
+            "ddouble": [None, None, None],
             "decimal": [None, None, None],
             "string": [None, None, None],
             "date": [None, None, dt("2020-01-02")],
@@ -200,7 +201,7 @@ def get_df_quicksight():
             "iint32": [1, None, 2],
             "iint64": [1, None, 2],
             "float": [0.0, None, 1.1],
-            "double": [0.0, None, 1.1],
+            "ddouble": [0.0, None, 1.1],
             "decimal": [Decimal((0, (1, 9, 9), -2)), None, Decimal((0, (1, 9, 0), -2))],
             "string_object": ["foo", None, "boo"],
             "string": ["foo", None, "boo"],
@@ -424,7 +425,7 @@ def ensure_data_types(df, has_list=False):
     assert str(df["iint32"].dtype).startswith("Int")
     assert str(df["iint64"].dtype) == "Int64"
     assert str(df["float"].dtype).startswith("float")
-    assert str(df["double"].dtype) == "float64"
+    assert str(df["ddouble"].dtype) == "float64"
     assert str(df["decimal"].dtype) == "object"
     if "string_object" in df.columns:
         assert str(df["string_object"].dtype) == "string"
@@ -507,23 +508,19 @@ def ensure_athena_query_metadata(df, ctas_approach=True, encrypted=False):
         assert df.query_metadata["Statistics"]["DataManifestLocation"] is not None
 
 
-def get_time_str_with_random_suffix():
+def get_time_str_with_random_suffix() -> str:
     time_str = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
     return f"{time_str}_{random.randrange(16**6):06x}"
 
 
-def path_generator(bucket):
+def path_generator(bucket: str) -> Iterator[str]:
     s3_path = f"s3://{bucket}/{get_time_str_with_random_suffix()}/"
     print(f"S3 Path: {s3_path}")
-    time.sleep(1)
     objs = wr.s3.list_objects(s3_path)
     wr.s3.delete_objects(path=objs)
-    wr.s3.wait_objects_not_exist(objs)
     yield s3_path
-    time.sleep(1)
     objs = wr.s3.list_objects(s3_path)
     wr.s3.delete_objects(path=objs)
-    wr.s3.wait_objects_not_exist(objs)
 
 
 def extract_cloudformation_outputs():
@@ -574,12 +571,16 @@ def create_workgroup(wkg_name, config):
     wkgs = [x["Name"] for x in wkgs["WorkGroups"]]
     deleted = False
     if wkg_name in wkgs:
-        wkg = client.get_work_group(WorkGroup=wkg_name)["WorkGroup"]
+        wkg = try_it(client.get_work_group, botocore.exceptions.ClientError, max_num_tries=5, WorkGroup=wkg_name)[
+            "WorkGroup"
+        ]
         if validate_workgroup_key(workgroup=wkg) is False:
             client.delete_work_group(WorkGroup=wkg_name, RecursiveDeleteOption=True)
             deleted = True
     if wkg_name not in wkgs or deleted is True:
         client.create_work_group(
-            Name=wkg_name, Configuration=config, Description=f"AWS Data Wrangler Test - {wkg_name}",
+            Name=wkg_name,
+            Configuration=config,
+            Description=f"AWS Data Wrangler Test - {wkg_name}",
         )
     return wkg_name

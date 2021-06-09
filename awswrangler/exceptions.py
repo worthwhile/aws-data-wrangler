@@ -99,3 +99,15 @@ class NoFilesFound(Exception):
 
 class InvalidDataFrame(Exception):
     """InvalidDataFrame."""
+
+
+class InvalidFile(Exception):
+    """InvalidFile."""
+
+
+class FailedQualityCheck(Exception):
+    """FailedQualityCheck."""
+
+
+class AlreadyExists(Exception):
+    """AlreadyExists."""

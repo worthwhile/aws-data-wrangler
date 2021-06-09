@@ -1,21 +1,22 @@
 """Internal (private) Utilities Module."""
 
 import copy
+import itertools
 import logging
 import math
 import os
 import random
 import time
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union, cast
+from concurrent.futures import FIRST_COMPLETED, Future, wait
+from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union, cast
 
-import boto3  # type: ignore
-import botocore.config  # type: ignore
-import numpy as np  # type: ignore
-import pandas as pd  # type: ignore
-import psycopg2  # type: ignore
-import s3fs  # type: ignore
+import boto3
+import botocore.config
+import numpy as np
+import pandas as pd
 
-from awswrangler import exceptions
+from awswrangler import _config, exceptions
+from awswrangler.__metadata__ import __version__
 from awswrangler._config import apply_configs
 
 _logger: logging.Logger = logging.getLogger(__name__)
@@ -60,17 +61,66 @@ def boto3_from_primitives(primitives: Optional[Boto3PrimitivesType] = None) -> b
     return boto3.Session(**args)
 
 
-def client(service_name: str, session: Optional[boto3.Session] = None) -> boto3.client:
-    """Create a valid boto3.client."""
-    return ensure_session(session=session).client(
-        service_name=service_name, use_ssl=True, config=botocore.config.Config(retries={"max_attempts": 15})
+def default_botocore_config() -> botocore.config.Config:
+    """Botocore configuration."""
+    retries_config: Dict[str, Union[str, int]] = {
+        "max_attempts": int(os.getenv("AWS_MAX_ATTEMPTS", "5")),
+    }
+    mode: Optional[str] = os.getenv("AWS_RETRY_MODE")
+    if mode:
+        retries_config["mode"] = mode
+    return botocore.config.Config(
+        retries=retries_config,
+        connect_timeout=10,
+        max_pool_connections=10,
+        user_agent_extra=f"awswrangler/{__version__}",
     )
 
 
-def resource(service_name: str, session: Optional[boto3.Session] = None) -> boto3.resource:
+def _get_endpoint_url(service_name: str) -> Optional[str]:
+    endpoint_url: Optional[str] = None
+    if service_name == "s3" and _config.config.s3_endpoint_url is not None:
+        endpoint_url = _config.config.s3_endpoint_url
+    elif service_name == "athena" and _config.config.athena_endpoint_url is not None:
+        endpoint_url = _config.config.athena_endpoint_url
+    elif service_name == "sts" and _config.config.sts_endpoint_url is not None:
+        endpoint_url = _config.config.sts_endpoint_url
+    elif service_name == "glue" and _config.config.glue_endpoint_url is not None:
+        endpoint_url = _config.config.glue_endpoint_url
+    elif service_name == "redshift" and _config.config.redshift_endpoint_url is not None:
+        endpoint_url = _config.config.redshift_endpoint_url
+    elif service_name == "kms" and _config.config.kms_endpoint_url is not None:
+        endpoint_url = _config.config.kms_endpoint_url
+    elif service_name == "emr" and _config.config.emr_endpoint_url is not None:
+        endpoint_url = _config.config.emr_endpoint_url
+    return endpoint_url
+
+
+@apply_configs
+def client(
+    service_name: str, session: Optional[boto3.Session] = None, botocore_config: Optional[botocore.config.Config] = None
+) -> boto3.client:
+    """Create a valid boto3.client."""
+    endpoint_url: Optional[str] = _get_endpoint_url(service_name=service_name)
+    return ensure_session(session=session).client(
+        service_name=service_name,
+        endpoint_url=endpoint_url,
+        use_ssl=True,
+        config=default_botocore_config() if botocore_config is None else botocore_config,
+    )
+
+
+@apply_configs
+def resource(
+    service_name: str, session: Optional[boto3.Session] = None, botocore_config: Optional[botocore.config.Config] = None
+) -> boto3.resource:
     """Create a valid boto3.resource."""
+    endpoint_url: Optional[str] = _get_endpoint_url(service_name=service_name)
     return ensure_session(session=session).resource(
-        service_name=service_name, use_ssl=True, config=botocore.config.Config(retries={"max_attempts": 15})
+        service_name=service_name,
+        endpoint_url=endpoint_url,
+        use_ssl=True,
+        config=default_botocore_config() if botocore_config is None else botocore_config,
     )
 
 
@@ -94,18 +144,22 @@ def parse_path(path: str) -> Tuple[str, str]:
     >>> from awswrangler._utils import parse_path
     >>> bucket, key = parse_path('s3://bucket/key')
 
+    >>> from awswrangler._utils import parse_path
+    >>> bucket, key = parse_path('s3://arn:aws:s3:<awsregion>:<awsaccount>:accesspoint/<ap_name>/<key>')
     """
     if path.startswith("s3://") is False:
         raise exceptions.InvalidArgumentValue(f"'{path}' is not a valid path. It MUST start with 's3://'")
-    parts = path.replace("s3://", "").split("/", 1)
+    parts = path.replace("s3://", "").replace(":accesspoint/", ":accesspoint:").split("/", 1)
     bucket: str = parts[0]
+    if "/" in bucket:
+        raise exceptions.InvalidArgumentValue(f"'{bucket}' is not a valid bucket name.")
     key: str = ""
     if len(parts) == 2:
         key = key if parts[1] is None else parts[1]
     return bucket, key
 
 
-def ensure_cpu_count(use_threads: bool = True) -> int:
+def ensure_cpu_count(use_threads: Union[bool, int] = True) -> int:
     """Get the number of cpu cores to be used.
 
     Note
@@ -114,8 +168,9 @@ def ensure_cpu_count(use_threads: bool = True) -> int:
 
     Parameters
     ----------
-    use_threads : bool
+    use_threads : Union[bool, int]
             True to enable multi-core utilization, False to disable.
+            If given an int will simply return the input value.
 
     Returns
     -------
@@ -131,6 +186,10 @@ def ensure_cpu_count(use_threads: bool = True) -> int:
     1
 
     """
+    if type(use_threads) == int:  # pylint: disable=unidiomatic-typecheck
+        if use_threads < 1:
+            return 1
+        return use_threads
     cpus: int = 1
     if use_threads is True:
         cpu_cnt: Optional[int] = os.cpu_count()
@@ -172,48 +231,9 @@ def chunkify(lst: List[Any], num_chunks: int = 1, max_length: Optional[int] = No
     return [arr.tolist() for arr in np_chunks if len(arr) > 0]
 
 
-@apply_configs
-def get_fs(
-    s3fs_block_size: int,
-    session: Optional[Union[boto3.Session, Dict[str, Optional[str]]]] = None,
-    s3_additional_kwargs: Optional[Dict[str, str]] = None,
-) -> s3fs.S3FileSystem:
-    """Build a S3FileSystem from a given boto3 session."""
-    fs: s3fs.S3FileSystem = s3fs.S3FileSystem(
-        anon=False,
-        use_ssl=True,
-        default_cache_type="readahead",
-        default_fill_cache=False,
-        default_block_size=s3fs_block_size,
-        config_kwargs={"retries": {"max_attempts": 15}},
-        session=ensure_session(session=session)._session,  # pylint: disable=protected-access
-        s3_additional_kwargs=s3_additional_kwargs,
-        use_listings_cache=False,
-        skip_instance_cache=True,
-    )
-    fs.invalidate_cache()
-    fs.clear_instance_cache()
-    return fs
-
-
-def open_file(fs: s3fs.S3FileSystem, **kwargs: Any) -> Any:
-    """Open s3fs file with retries to overcome eventual consistency."""
-    fs.invalidate_cache()
-    fs.clear_instance_cache()
-    return try_it(f=fs.open, ex=FileNotFoundError, **kwargs)
-
-
 def empty_generator() -> Generator[None, None, None]:
     """Empty Generator."""
     yield from ()
-
-
-def ensure_postgresql_casts() -> None:
-    """Ensure that psycopg2 will handle some data types right."""
-    psycopg2.extensions.register_adapter(bytes, psycopg2.Binary)
-    typecast_bytea = lambda data, cur: None if data is None else bytes(psycopg2.BINARY(data, cur))  # noqa
-    BYTEA = psycopg2.extensions.new_type(psycopg2.BINARY.values, "BYTEA", typecast_bytea)
-    psycopg2.extensions.register_type(BYTEA)
 
 
 def get_directory(path: str) -> str:
@@ -239,8 +259,20 @@ def get_region_from_session(boto3_session: Optional[boto3.Session] = None, defau
     raise exceptions.InvalidArgument("There is no region_name defined on boto3, please configure it.")
 
 
+def get_credentials_from_session(
+    boto3_session: Optional[boto3.Session] = None,
+) -> botocore.credentials.ReadOnlyCredentials:
+    """Get AWS credentials from boto3 session."""
+    session: boto3.Session = ensure_session(session=boto3_session)
+    credentials: botocore.credentials.Credentials = session.get_credentials()
+    frozen_credentials: botocore.credentials.ReadOnlyCredentials = credentials.get_frozen_credentials()
+    return frozen_credentials
+
+
 def list_sampling(lst: List[Any], sampling: float) -> List[Any]:
     """Random List sampling."""
+    if sampling == 1.0:
+        return lst
     if sampling > 1.0 or sampling <= 0.0:
         raise exceptions.InvalidArgumentValue(f"Argument <sampling> must be [0.0 < value <= 1.0]. {sampling} received.")
     _len: int = len(lst)
@@ -252,7 +284,9 @@ def list_sampling(lst: List[Any], sampling: float) -> List[Any]:
     _logger.debug("_len: %s", _len)
     _logger.debug("sampling: %s", sampling)
     _logger.debug("num_samples: %s", num_samples)
-    return random.sample(population=lst, k=num_samples)
+    random_lst: List[Any] = random.sample(population=lst, k=num_samples)
+    random_lst.sort()
+    return random_lst
 
 
 def ensure_df_is_mutable(df: pd.DataFrame) -> pd.DataFrame:
@@ -266,20 +300,27 @@ def ensure_df_is_mutable(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def insert_str(text: str, token: str, insert: str) -> str:
-    """Insert string into other."""
-    index: int = text.find(token)
-    return text[:index] + insert + text[index:]
-
-
 def check_duplicated_columns(df: pd.DataFrame) -> Any:
     """Raise an exception if there are duplicated columns names."""
     duplicated: List[str] = df.loc[:, df.columns.duplicated()].columns.to_list()
     if duplicated:
-        raise exceptions.InvalidDataFrame(f"There is duplicated column names in your DataFrame: {duplicated}")
+        raise exceptions.InvalidDataFrame(
+            f"There are duplicated column names in your DataFrame: {duplicated}. "
+            f"Note that your columns may have been sanitized and it can be the cause of "
+            f"the duplicity. Wrangler sanitization removes all special characters and "
+            f"also converts CamelCase to snake_case. So you must avoid columns like "
+            f"['MyCol', 'my_col'] in your DataFrame."
+        )
 
 
-def try_it(f: Callable[..., Any], ex: Any, base: float = 1.0, max_num_tries: int = 3, **kwargs: Any) -> Any:
+def try_it(
+    f: Callable[..., Any],
+    ex: Any,
+    ex_code: Optional[str] = None,
+    base: float = 1.0,
+    max_num_tries: int = 3,
+    **kwargs: Any,
+) -> Any:
     """Run function with decorrelated Jitter.
 
     Reference: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
@@ -289,8 +330,44 @@ def try_it(f: Callable[..., Any], ex: Any, base: float = 1.0, max_num_tries: int
         try:
             return f(**kwargs)
         except ex as exception:
+            if ex_code is not None and hasattr(exception, "response"):
+                if exception.response["Error"]["Code"] != ex_code:
+                    raise
             if i == (max_num_tries - 1):
-                raise exception
+                raise
             delay = random.uniform(base, delay * 3)
             _logger.error("Retrying %s | Fail number %s/%s | Exception: %s", f, i + 1, max_num_tries, exception)
             time.sleep(delay)
+    raise RuntimeError()
+
+
+def get_even_chunks_sizes(total_size: int, chunk_size: int, upper_bound: bool) -> Tuple[int, ...]:
+    """Calculate even chunks sizes (Best effort)."""
+    round_func: Callable[[float], float] = math.ceil if upper_bound is True else math.floor
+    num_chunks: int = int(round_func(float(total_size) / float(chunk_size)))
+    num_chunks = 1 if num_chunks < 1 else num_chunks
+    base_size: int = int(total_size / num_chunks)
+    rest: int = total_size % num_chunks
+    sizes: List[int] = list(itertools.repeat(base_size, num_chunks))
+    for i in range(rest):
+        i_cycled: int = i % len(sizes)
+        sizes[i_cycled] += 1
+    return tuple(sizes)
+
+
+def get_running_futures(seq: Sequence[Future]) -> Tuple[Future, ...]:  # type: ignore
+    """Filter only running futures."""
+    return tuple(f for f in seq if f.running())
+
+
+def wait_any_future_available(seq: Sequence[Future]) -> None:  # type: ignore
+    """Wait until any future became available."""
+    wait(fs=seq, timeout=None, return_when=FIRST_COMPLETED)
+
+
+def block_waiting_available_thread(seq: Sequence[Future], max_workers: int) -> None:  # type: ignore
+    """Block until any thread became available."""
+    running: Tuple[Future, ...] = get_running_futures(seq=seq)  # type: ignore
+    while len(running) >= max_workers:
+        wait_any_future_available(seq=running)
+        running = get_running_futures(seq=running)

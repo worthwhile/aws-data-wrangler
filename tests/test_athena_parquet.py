@@ -1,11 +1,16 @@
 import datetime
 import logging
 import math
+from decimal import Decimal
 
+import boto3
+import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 import awswrangler as wr
+from awswrangler._data_types import _split_fields
 
 from ._utils import ensure_data_types, get_df, get_df_cast, get_df_list
 
@@ -74,7 +79,6 @@ def test_file_size(path, glue_table, glue_database, use_threads, max_rows_by_fil
     )["paths"]
     if max_rows_by_file is not None and max_rows_by_file > 0:
         assert len(paths) >= math.floor(300 / max_rows_by_file)
-    wr.s3.wait_objects_exist(paths, use_threads=use_threads)
     df2 = wr.s3.read_parquet(path=path, dataset=True, use_threads=use_threads)
     ensure_data_types(df2, has_list=True)
     assert df2.shape == (300, 19)
@@ -94,7 +98,7 @@ def test_parquet_catalog_duplicated(path, glue_table, glue_database):
 
 
 def test_parquet_catalog_casting(path, glue_database):
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=get_df_cast(),
         path=path,
         index=False,
@@ -108,7 +112,7 @@ def test_parquet_catalog_casting(path, glue_database):
             "iint32": "int",
             "iint64": "bigint",
             "float": "float",
-            "double": "double",
+            "ddouble": "double",
             "decimal": "decimal(3,2)",
             "string": "string",
             "date": "date",
@@ -119,8 +123,7 @@ def test_parquet_catalog_casting(path, glue_database):
             "par0": "bigint",
             "par1": "string",
         },
-    )["paths"]
-    wr.s3.wait_objects_exist(paths=paths)
+    )
     df = wr.s3.read_parquet(path=path)
     assert df.shape == (3, 16)
     ensure_data_types(df=df, has_list=False)
@@ -134,9 +137,31 @@ def test_parquet_catalog_casting(path, glue_database):
     assert wr.catalog.delete_table_if_exists(database=glue_database, table="__test_parquet_catalog_casting") is True
 
 
+def test_parquet_catalog_casting_to_string_with_null(path, glue_table, glue_database):
+    data = [{"A": "foo"}, {"A": "boo", "B": "bar"}]
+    df = pd.DataFrame(data)
+    wr.s3.to_parquet(
+        df, path, dataset=True, database=glue_database, table=glue_table, dtype={"A": "string", "B": "string"}
+    )
+    df = wr.s3.read_parquet(path=path)
+    assert df.shape == (2, 2)
+    for dtype in df.dtypes.values:
+        assert str(dtype) == "string"
+    assert pd.isna(df[df["a"] == "foo"].b.iloc[0])
+    df = wr.athena.read_sql_table(table=glue_table, database=glue_database, ctas_approach=True)
+    assert df.shape == (2, 2)
+    for dtype in df.dtypes.values:
+        assert str(dtype) == "string"
+    assert pd.isna(df[df["a"] == "foo"].b.iloc[0])
+    df = wr.athena.read_sql_query(
+        f"SELECT count(*) as counter FROM {glue_table} WHERE b is NULL ", database=glue_database
+    )
+    assert df.counter.iloc[0] == 1
+
+
 @pytest.mark.parametrize("compression", [None, "gzip", "snappy"])
 def test_parquet_compress(path, glue_table, glue_database, compression):
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=get_df(),
         path=path,
         compression=compression,
@@ -144,8 +169,7 @@ def test_parquet_compress(path, glue_table, glue_database, compression):
         database=glue_database,
         table=glue_table,
         mode="overwrite",
-    )["paths"]
-    wr.s3.wait_objects_exist(paths=paths)
+    )
     df2 = wr.athena.read_sql_table(glue_table, glue_database)
     ensure_data_types(df2)
     df2 = wr.s3.read_parquet(path=path)
@@ -186,7 +210,7 @@ def test_parquet_chunked(path, glue_database, glue_table, col2, chunked):
     wr.s3.delete_objects(path=path)
     values = list(range(5))
     df = pd.DataFrame({"col1": values, "col2": col2})
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df,
         path,
         index=False,
@@ -195,8 +219,7 @@ def test_parquet_chunked(path, glue_database, glue_table, col2, chunked):
         table=glue_table,
         partition_cols=["col2"],
         mode="overwrite",
-    )["paths"]
-    wr.s3.wait_objects_exist(paths=paths)
+    )
 
     dfs = list(wr.s3.read_parquet(path=path, dataset=True, chunked=chunked))
     assert sum(values) == pd.concat(dfs, ignore_index=True).col1.sum()
@@ -216,7 +239,6 @@ def test_parquet_chunked(path, glue_database, glue_table, col2, chunked):
             assert chunked == len(df2)
         assert chunked >= len(dfs[-1])
 
-    wr.s3.delete_objects(path=paths)
     assert wr.catalog.delete_table_if_exists(database=glue_database, table=glue_table) is True
 
 
@@ -226,10 +248,7 @@ def test_unsigned_parquet(path, glue_database, glue_table):
     df["c0"] = df.c0.astype("uint8")
     df["c1"] = df.c1.astype("uint16")
     df["c2"] = df.c2.astype("uint32")
-    paths = wr.s3.to_parquet(
-        df=df, path=path, dataset=True, database=glue_database, table=glue_table, mode="overwrite"
-    )["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table, mode="overwrite")
     df = wr.athena.read_sql_table(table=glue_table, database=glue_database)
     assert df.c0.sum() == (2 ** 8) - 1
     assert df.c1.sum() == (2 ** 16) - 1
@@ -254,8 +273,7 @@ def test_unsigned_parquet(path, glue_database, glue_table):
 
 def test_parquet_overwrite_partition_cols(path, glue_database, glue_table):
     df = pd.DataFrame({"c0": [1, 2, 1, 2], "c1": [1, 2, 1, 2], "c2": [2, 1, 2, 1]})
-
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
         path=path,
         dataset=True,
@@ -263,8 +281,7 @@ def test_parquet_overwrite_partition_cols(path, glue_database, glue_table):
         table=glue_table,
         mode="overwrite",
         partition_cols=["c2"],
-    )["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+    )
     df = wr.athena.read_sql_table(table=glue_table, database=glue_database)
     assert len(df.index) == 4
     assert len(df.columns) == 3
@@ -272,7 +289,7 @@ def test_parquet_overwrite_partition_cols(path, glue_database, glue_table):
     assert df.c1.sum() == 6
     assert df.c2.sum() == 6
 
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
         path=path,
         dataset=True,
@@ -280,8 +297,7 @@ def test_parquet_overwrite_partition_cols(path, glue_database, glue_table):
         table=glue_table,
         mode="overwrite",
         partition_cols=["c1", "c2"],
-    )["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+    )
     df = wr.athena.read_sql_table(table=glue_table, database=glue_database)
     assert len(df.index) == 4
     assert len(df.columns) == 3
@@ -293,8 +309,7 @@ def test_parquet_overwrite_partition_cols(path, glue_database, glue_table):
 @pytest.mark.parametrize("partition_cols", [None, ["c2"], ["c1", "c2"]])
 def test_store_metadata_partitions_dataset(glue_database, glue_table, path, partition_cols):
     df = pd.DataFrame({"c0": [0, 1, 2], "c1": [3, 4, 5], "c2": [6, 7, 8]})
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, partition_cols=partition_cols)["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, partition_cols=partition_cols)
     wr.s3.store_parquet_metadata(path=path, database=glue_database, table=glue_table, dataset=True)
     df2 = wr.athena.read_sql_table(table=glue_table, database=glue_database)
     assert len(df.index) == len(df2.index)
@@ -309,8 +324,7 @@ def test_store_metadata_partitions_sample_dataset(glue_database, glue_table, pat
     num_files = 10
     df = pd.DataFrame({"c0": [0, 1, 2], "c1": [3, 4, 5], "c2": [6, 7, 8]})
     for _ in range(num_files):
-        paths = wr.s3.to_parquet(df=df, path=path, dataset=True, partition_cols=partition_cols)["paths"]
-        wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+        wr.s3.to_parquet(df=df, path=path, dataset=True, partition_cols=partition_cols)
     wr.s3.store_parquet_metadata(
         path=path,
         database=glue_database,
@@ -330,10 +344,9 @@ def test_store_metadata_partitions_sample_dataset(glue_database, glue_table, pat
 @pytest.mark.parametrize("partition_cols", [None, ["c1"], ["c2"], ["c1", "c2"], ["c2", "c1"]])
 def test_to_parquet_reverse_partitions(glue_database, glue_table, path, partition_cols):
     df = pd.DataFrame({"c0": [0, 1, 2], "c1": [3, 4, 5], "c2": [6, 7, 8]})
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df, path=path, dataset=True, database=glue_database, table=glue_table, partition_cols=partition_cols
-    )["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+    )
     df2 = wr.athena.read_sql_table(table=glue_table, database=glue_database)
     assert df.shape == df2.shape
     assert df.c0.sum() == df2.c0.sum()
@@ -352,13 +365,11 @@ def test_to_parquet_nested_append(glue_database, glue_table, path):
             "c5": [{"a": {"b": {"c": [1, 2]}}}, {"a": {"b": {"c": [3, 4]}}}],
         }
     )
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)
     df2 = wr.athena.read_sql_query(sql=f"SELECT c0, c1, c2, c4 FROM {glue_table}", database=glue_database)
     assert len(df2.index) == 2
     assert len(df2.columns) == 4
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)
     df2 = wr.athena.read_sql_query(sql=f"SELECT c0, c1, c2, c4 FROM {glue_table}", database=glue_database)
     assert len(df2.index) == 4
     assert len(df2.columns) == 4
@@ -366,18 +377,16 @@ def test_to_parquet_nested_append(glue_database, glue_table, path):
 
 def test_to_parquet_nested_cast(glue_database, glue_table, path):
     df = pd.DataFrame({"c0": [[1, 2, 3], [4, 5, 6]], "c1": [[], []], "c2": [{"a": 1, "b": 2}, {"a": 3, "b": 4}]})
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df=df,
         path=path,
         dataset=True,
         database=glue_database,
         table=glue_table,
         dtype={"c0": "array<double>", "c1": "array<string>", "c2": "struct<a:bigint, b:double>"},
-    )["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+    )
     df = pd.DataFrame({"c0": [[1, 2, 3], [4, 5, 6]], "c1": [["a"], ["b"]], "c2": [{"a": 1, "b": 2}, {"a": 3, "b": 4}]})
-    paths = wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=False)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)
     df2 = wr.athena.read_sql_query(sql=f"SELECT c0, c2 FROM {glue_table}", database=glue_database)
     assert len(df2.index) == 4
     assert len(df2.columns) == 2
@@ -385,7 +394,7 @@ def test_to_parquet_nested_cast(glue_database, glue_table, path):
 
 def test_parquet_catalog_casting_to_string(path, glue_table, glue_database):
     for df in [get_df(), get_df_cast()]:
-        paths = wr.s3.to_parquet(
+        wr.s3.to_parquet(
             df=df,
             path=path,
             index=False,
@@ -399,7 +408,7 @@ def test_parquet_catalog_casting_to_string(path, glue_table, glue_database):
                 "iint32": "string",
                 "iint64": "string",
                 "float": "string",
-                "double": "string",
+                "ddouble": "string",
                 "decimal": "string",
                 "string": "string",
                 "date": "string",
@@ -411,8 +420,7 @@ def test_parquet_catalog_casting_to_string(path, glue_table, glue_database):
                 "par0": "string",
                 "par1": "string",
             },
-        )["paths"]
-        wr.s3.wait_objects_exist(paths=paths)
+        )
         df = wr.s3.read_parquet(path=path)
         assert df.shape == (3, 16)
         for dtype in df.dtypes.values:
@@ -431,7 +439,7 @@ def test_parquet_catalog_casting_to_string(path, glue_table, glue_database):
 @pytest.mark.parametrize("partition_cols", [["c2"], ["c1", "c2"]])
 def test_read_parquet_filter_partitions(path, glue_table, glue_database, use_threads, partition_cols):
     df = pd.DataFrame({"c0": [0, 1, 2], "c1": [0, 1, 2], "c2": [0, 1, 2]})
-    paths = wr.s3.to_parquet(
+    wr.s3.to_parquet(
         df,
         path,
         dataset=True,
@@ -439,8 +447,7 @@ def test_read_parquet_filter_partitions(path, glue_table, glue_database, use_thr
         use_threads=use_threads,
         table=glue_table,
         database=glue_database,
-    )["paths"]
-    wr.s3.wait_objects_exist(paths=paths, use_threads=use_threads)
+    )
     for i in range(3):
         df2 = wr.s3.read_parquet_table(
             table=glue_table,
@@ -466,7 +473,11 @@ def test_glue_number_of_versions_created(path, glue_table, glue_database):
     df = pd.DataFrame({"c0": [0, 1, 2], "c1": [0, 1, 2]})
     for _ in range(5):
         wr.s3.to_parquet(
-            df, path, dataset=True, table=glue_table, database=glue_database,
+            df,
+            path,
+            dataset=True,
+            table=glue_table,
+            database=glue_database,
         )
     assert wr.catalog.get_table_number_of_versions(table=glue_table, database=glue_database) == 1
 
@@ -482,3 +493,262 @@ def test_sanitize_index(path, glue_table, glue_database):
     assert df2.shape == (4, 2)
     assert df2.id.sum() == 6
     assert list(df2.columns) == ["id", "date"]
+
+
+def test_to_parquet_sanitize(path, glue_database):
+    df = pd.DataFrame({"C0": [0, 1], "camelCase": [2, 3], "c**--2": [4, 5]})
+    table_name = "TableName*!"
+    wr.s3.to_parquet(
+        df, path, dataset=True, database=glue_database, table=table_name, mode="overwrite", partition_cols=["c**--2"]
+    )
+    df2 = wr.athena.read_sql_table(database=glue_database, table=table_name)
+    wr.catalog.delete_table_if_exists(database=glue_database, table="table_name_")
+    assert df.shape == df2.shape
+    assert list(df2.columns) == ["c0", "camel_case", "c_2"]
+    assert df2.c0.sum() == 1
+    assert df2.camel_case.sum() == 5
+    assert df2.c_2.sum() == 9
+
+
+def test_schema_evolution_disabled(path, glue_table, glue_database):
+    wr.s3.to_parquet(
+        df=pd.DataFrame({"c0": [1]}),
+        path=path,
+        dataset=True,
+        database=glue_database,
+        table=glue_table,
+        schema_evolution=False,
+    )
+    with pytest.raises(wr.exceptions.InvalidArgumentValue):
+        wr.s3.to_parquet(
+            df=pd.DataFrame({"c0": [2], "c1": [2]}),
+            path=path,
+            dataset=True,
+            database=glue_database,
+            table=glue_table,
+            schema_evolution=False,
+        )
+    wr.s3.to_parquet(
+        df=pd.DataFrame({"c0": [2]}),
+        path=path,
+        dataset=True,
+        database=glue_database,
+        table=glue_table,
+        schema_evolution=False,
+    )
+    df2 = wr.athena.read_sql_table(database=glue_database, table=glue_table)
+    assert df2.shape == (2, 1)
+    assert df2.c0.sum() == 3
+
+
+def test_date_cast(path, glue_table, glue_database):
+    df = pd.DataFrame(
+        {
+            "c0": [
+                datetime.date(4000, 1, 1),
+                datetime.datetime(2000, 1, 1, 10),
+                "2020",
+                "2020-01",
+                1,
+                None,
+                pd.NA,
+                pd.NaT,
+                np.nan,
+                np.inf,
+            ]
+        }
+    )
+    df_expected = pd.DataFrame(
+        {
+            "c0": [
+                datetime.date(4000, 1, 1),
+                datetime.date(2000, 1, 1),
+                datetime.date(2020, 1, 1),
+                datetime.date(2020, 1, 1),
+                datetime.date(1970, 1, 1),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ]
+        }
+    )
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table, dtype={"c0": "date"})
+    df2 = wr.s3.read_parquet(path=path)
+    assert df_expected.equals(df2)
+    df3 = wr.athena.read_sql_table(database=glue_database, table=glue_table)
+    assert df_expected.equals(df3)
+
+
+@pytest.mark.parametrize("use_threads", [True, False])
+@pytest.mark.parametrize("partition_cols", [None, ["par0"], ["par0", "par1"]])
+def test_partitions_overwrite(path, glue_table, glue_database, use_threads, partition_cols):
+    df = get_df_list()
+    wr.s3.to_parquet(
+        df=df,
+        path=path,
+        dataset=True,
+        database=glue_database,
+        table=glue_table,
+        use_threads=use_threads,
+        partition_cols=partition_cols,
+        mode="overwrite_partitions",
+    )
+    wr.s3.to_parquet(
+        df=df,
+        path=path,
+        dataset=True,
+        database=glue_database,
+        table=glue_table,
+        use_threads=use_threads,
+        partition_cols=partition_cols,
+        mode="overwrite_partitions",
+    )
+    df2 = wr.athena.read_sql_table(database=glue_database, table=glue_table, use_threads=use_threads)
+    ensure_data_types(df2, has_list=True)
+    assert df2.shape == (3, 19)
+    assert df.iint8.sum() == df2.iint8.sum()
+
+
+def test_empty_dataframe(path, glue_database, glue_table):
+    df = get_df_list()
+    wr.s3.to_parquet(
+        df=df,
+        path=path,
+        dataset=True,
+        database=glue_database,
+        table=glue_table,
+    )
+    sql = f"SELECT * FROM {glue_table} WHERE par0 = :par0;"
+    df_uncached = wr.athena.read_sql_query(sql=sql, database=glue_database, ctas_approach=True, params={"par0": 999})
+    df_cached = wr.athena.read_sql_query(sql=sql, database=glue_database, ctas_approach=True, params={"par0": 999})
+    assert set(df.columns) == set(df_uncached.columns)
+    assert set(df.columns) == set(df_cached.columns)
+
+
+@pytest.mark.parametrize("use_threads", [True, False])
+def test_empty_column(path, glue_table, glue_database, use_threads):
+    df = pd.DataFrame({"c0": [1, 2, 3], "c1": [None, None, None], "par": ["a", "b", "c"]})
+    df["c0"] = df["c0"].astype("Int64")
+    df["par"] = df["par"].astype("string")
+    with pytest.raises(wr.exceptions.UndetectedType):
+        wr.s3.to_parquet(
+            df,
+            path,
+            dataset=True,
+            use_threads=use_threads,
+            table=glue_table,
+            database=glue_database,
+            partition_cols=["par"],
+        )
+
+
+@pytest.mark.parametrize("use_threads", [True, False])
+def test_mixed_types_column(path, glue_table, glue_database, use_threads):
+    df = pd.DataFrame({"c0": [1, 2, 3], "c1": [1, 2, "foo"], "par": ["a", "b", "c"]})
+    df["c0"] = df["c0"].astype("Int64")
+    df["par"] = df["par"].astype("string")
+    with pytest.raises(pa.ArrowInvalid):
+        wr.s3.to_parquet(
+            df,
+            path,
+            dataset=True,
+            use_threads=use_threads,
+            table=glue_table,
+            database=glue_database,
+            partition_cols=["par"],
+        )
+
+
+@pytest.mark.parametrize("use_threads", [True, False])
+def test_failing_catalog(path, glue_table, use_threads):
+    df = pd.DataFrame({"c0": [1, 2, 3]})
+    try:
+        wr.s3.to_parquet(
+            df, path, use_threads=use_threads, max_rows_by_file=1, dataset=True, table=glue_table, database="foo"
+        )
+    except boto3.client("glue").exceptions.EntityNotFoundException:
+        pass
+    assert len(wr.s3.list_objects(path)) == 0
+
+
+def test_cast_decimal(path, glue_table, glue_database):
+    df = pd.DataFrame(
+        {"c0": [100.1], "c1": ["100.1"], "c2": [Decimal((0, (1, 0, 0, 1), -1))], "c3": [Decimal((0, (1, 0, 0, 1), -1))]}
+    )
+    wr.s3.to_parquet(
+        df=df,
+        path=path,
+        dataset=True,
+        database=glue_database,
+        table=glue_table,
+        dtype={"c0": "decimal(4,1)", "c1": "decimal(4,1)", "c2": "decimal(4,1)", "c3": "string"},
+    )
+    df2 = wr.athena.read_sql_table(table=glue_table, database=glue_database)
+    assert df2.shape == (1, 4)
+    assert df2["c0"].iloc[0] == Decimal((0, (1, 0, 0, 1), -1))
+    assert df2["c1"].iloc[0] == Decimal((0, (1, 0, 0, 1), -1))
+    assert df2["c2"].iloc[0] == Decimal((0, (1, 0, 0, 1), -1))
+    assert df2["c3"].iloc[0] == "100.1"
+
+
+def test_splits():
+    s = "a:struct<id:string,name:string>,b:struct<id:string,name:string>"
+    assert list(_split_fields(s)) == ["a:struct<id:string,name:string>", "b:struct<id:string,name:string>"]
+    s = "a:struct<a:struct<id:string,name:string>,b:struct<id:string,name:string>>,b:struct<a:struct<id:string,name:string>,b:struct<id:string,name:string>>"  # noqa
+    assert list(_split_fields(s)) == [
+        "a:struct<a:struct<id:string,name:string>,b:struct<id:string,name:string>>",
+        "b:struct<a:struct<id:string,name:string>,b:struct<id:string,name:string>>",
+    ]
+    s = "a:struct<id:string,name:string>,b:struct<id:string,name:string>,c:struct<id:string,name:string>,d:struct<id:string,name:string>"  # noqa
+    assert list(_split_fields(s)) == [
+        "a:struct<id:string,name:string>",
+        "b:struct<id:string,name:string>",
+        "c:struct<id:string,name:string>",
+        "d:struct<id:string,name:string>",
+    ]
+
+
+def test_to_parquet_nested_structs(glue_database, glue_table, path):
+    df = pd.DataFrame(
+        {
+            "c0": [1],
+            "c1": [[{"a": {"id": "0", "name": "foo", "amount": 1}, "b": {"id": "1", "name": "boo", "amount": 2}}]],
+        }
+    )
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)
+    df2 = wr.athena.read_sql_query(sql=f"SELECT * FROM {glue_table}", database=glue_database)
+    assert df2.shape == (1, 2)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)
+    df3 = wr.athena.read_sql_query(sql=f"SELECT * FROM {glue_table}", database=glue_database)
+    assert df3.shape == (2, 2)
+
+
+def test_ignore_empty_files(glue_database, glue_table, path):
+    df = pd.DataFrame({"c0": [0, 1], "c1": ["foo", "boo"]})
+    bucket, directory = wr._utils.parse_path(path)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)
+    boto3.client("s3").put_object(Body=b"", Bucket=bucket, Key=f"{directory}to_be_ignored")
+    df2 = wr.athena.read_sql_query(sql=f"SELECT * FROM {glue_table}", database=glue_database)
+    assert df2.shape == df.shape
+    df3 = wr.s3.read_parquet_table(database=glue_database, table=glue_table)
+    assert df3.shape == df.shape
+
+
+def test_suffix(glue_database, glue_table, path):
+    df = pd.DataFrame({"c0": [0, 1], "c1": ["foo", "boo"]})
+    bucket, directory = wr._utils.parse_path(path)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)
+    boto3.client("s3").put_object(Body=b"garbage", Bucket=bucket, Key=f"{directory}to_be_ignored")
+    df2 = wr.s3.read_parquet_table(database=glue_database, table=glue_table, filename_suffix=".parquet")
+    assert df2.shape == df.shape
+
+
+def test_ignore_suffix(glue_database, glue_table, path):
+    df = pd.DataFrame({"c0": [0, 1], "c1": ["foo", "boo"]})
+    bucket, directory = wr._utils.parse_path(path)
+    wr.s3.to_parquet(df=df, path=path, dataset=True, database=glue_database, table=glue_table)
+    boto3.client("s3").put_object(Body=b"garbage", Bucket=bucket, Key=f"{directory}to_be_ignored")
+    df2 = wr.s3.read_parquet_table(database=glue_database, table=glue_table, filename_ignore_suffix="ignored")
+    assert df2.shape == df.shape

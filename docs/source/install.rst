@@ -1,13 +1,16 @@
 Install
 =======
 
-**AWS Data Wrangler** runs with Python ``3.6``, ``3.7`` and ``3.8``
+**AWS Data Wrangler** runs with Python ``3.6``, ``3.7``, ``3.8`` and ``3.9``
 and on several platforms (AWS Lambda, AWS Glue Python Shell, EMR, EC2,
 on-premises, Amazon SageMaker, local, etc).
 
-Some good practices for most of the methods bellow are:
+Some good practices for most of the methods below are:
+
   - Use new and individual Virtual Environments for each project (`venv <https://docs.python.org/3/library/venv.html>`_).
   - On Notebooks, always restart your kernel after installations.
+
+.. note:: If you want to use ``awswrangler`` for connecting to Microsoft SQL Server, some additional configuration is needed. Please have a look at the corresponding section below.
 
 PyPI (pip)
 ----------
@@ -52,17 +55,50 @@ AWS Glue PySpark Jobs
 
 .. note:: AWS Data Wrangler has compiled dependencies (C/C++) so there is only support for ``Glue PySpark Jobs >= 2.0``.
 
-1 - Go to `GitHub's release page <https://github.com/awslabs/aws-data-wrangler/releases>`_ and download the wheel file
-(.whl) related to the desired version.
-
-2 - Upload the wheel file to any Amazon S3 location.
-
-3 - Go to your Glue PySpark job and create a new *Job parameters* key/value:
+Go to your Glue PySpark job and create a new *Job parameters* key/value:
 
 * Key: ``--additional-python-modules``
-* Value: ``s3://{BUCKET_NAME}/awswrangler-{VERSION}-py3-none-any.whl``
+* Value: ``pyarrow==2,awswrangler``
+
+To install a specific version, set the value for above Job parameter as follows:
+
+* Value: ``pyarrow==2,awswrangler==2.8.0``
+
+.. note:: Pyarrow 3 is not currently supported in Glue PySpark Jobs, which is why a previous installation of pyarrow 2 is required.
 
 `Official Glue PySpark Reference <https://docs.aws.amazon.com/glue/latest/dg/reduced-start-times-spark-etl-jobs.html#reduced-start-times-new-features>`_
+
+Public Artifacts
+---------------------
+
+Lambda zipped layers and Python wheels are stored in a publicly accessible S3 bucket for all versions.
+
+* Bucket: ``aws-data-wrangler-public-artifacts``
+
+* Prefix: ``releases/<version>/``
+
+  * Lambda layer: ``awswrangler-layer-<version>-py<py-version>.zip``
+
+  * Python wheel: ``awswrangler-<version>-py3-none-any.whl``
+
+Here is an example of how to reference the Lambda layer in your CDK app:
+
+.. code-block:: python
+
+    wrangler_layer = LayerVersion(
+      self,
+      "wrangler-layer",
+      compatible_runtimes=[Runtime.PYTHON_3_8],
+      code=S3Code(
+        bucket=Bucket.from_bucket_arn(
+            self,
+            "wrangler-bucket",
+            bucket_arn="arn:aws:s3:::aws-data-wrangler-public-artifacts",
+        ),
+        key="releases/2.8.0/awswrangler-layer-2.8.0-py3.8.zip",
+      ),
+      layer_version_name="aws-data-wrangler"
+    )
 
 Amazon SageMaker Notebook
 -------------------------
@@ -115,7 +151,7 @@ AWS Data Wrangler could be a good helper to
 complement Big Data pipelines.
 
 - Configure Python 3 as the default interpreter for
-  PySpark under your cluster configuration
+  PySpark on your cluster configuration [ONLY REQUIRED FOR EMR < 6]
 
     .. code-block:: json
 
@@ -135,15 +171,28 @@ complement Big Data pipelines.
 
 - Keep the bootstrap script above on S3 and reference it on your cluster.
 
+  - For EMR Release < 6
+
     .. code-block:: sh
 
         #!/usr/bin/env bash
         set -ex
 
-        sudo pip-3.6 install awswrangler
+        sudo pip-3.6 install pyarrow==2 awswrangler
+
+  - For EMR Release >= 6
+
+    .. code-block:: sh
+
+        #!/usr/bin/env bash
+        set -ex
+
+        sudo pip install pyarrow==2 awswrangler
 
 .. note:: Make sure to freeze the Wrangler version in the bootstrap for productive
-          environments (e.g. awswrangler==1.8.1)
+          environments (e.g. awswrangler==2.8.0)
+
+.. note:: Pyarrow 3 is not currently supported in the default EMR image, which is why a previous installation of pyarrow 2 is required.
 
 From Source
 -----------
@@ -151,3 +200,33 @@ From Source
     >>> git clone https://github.com/awslabs/aws-data-wrangler.git
     >>> cd aws-data-wrangler
     >>> pip install .
+
+
+Notes for Microsoft SQL Server
+------------------------------
+
+``awswrangler`` is using the `pyodbc <https://github.com/mkleehammer/pyodbc>`_
+for interacting with Microsoft SQL Server. For installing this package you need the ODBC header files,
+which can be installed, for example, with the following commands:
+
+    >>> sudo apt install unixodbc-dev
+    >>> yum install unixODBC-devel
+
+After installing these header files you can either just install ``pyodbc`` or
+``awswrangler`` with the ``sqlserver`` extra, which will also install ``pyodbc``:
+
+    >>> pip install pyodbc
+    >>> pip install awswrangler[sqlserver]
+
+Finally you also need the correct ODBC Driver for SQL Server. You can have a look at the
+`documentation from Microsoft <https://docs.microsoft.com/sql/connect/odbc/
+microsoft-odbc-driver-for-sql-server?view=sql-server-ver15>`_
+to see how they can be installed in your environment.
+
+If you want to connect to Microsoft SQL Server from AWS Lambda, you can build a separate Layer including the
+needed OBDC drivers and `pyobdc`.
+
+If you maintain your own environment, you need to take care of the above steps.
+Because of this limitation usage in combination with Glue jobs is limited and you need to rely on the
+provided `functionality inside Glue itself <https://docs.aws.amazon.com/glue/latest/dg/
+aws-glue-programming-etl-connect.html#aws-glue-programming-etl-connect-jdbc>`_.
